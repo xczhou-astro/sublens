@@ -42,6 +42,9 @@ env/
 *.png
 *.jpg
 *.jpeg
+*.fits
+*.ipynb
+component_plots/
 archive/
 
 # Loose experimental scripts (not part of the package)

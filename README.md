@@ -29,43 +29,70 @@ It implements a unified three-stage hybrid inversion architecture:
 
 ## High-Level Python API
 
-SubLens provides an intuitive, high-level interface allowing full blind subhalo searches in just 3 lines of Python code:
+SubLens provides an intuitive, high-level interface allowing full blind subhalo searches in just 3 lines of Python code, supporting both direct FITS files (HST, Euclid, JWST) and in-memory arrays:
 
 ### 1. Automated Detection Pipeline (`SubLensPipeline`)
 ```python
 import sublens as sl
 
-# 1. Initialize Pipeline with instrument and cosmological specifications
+# Option A: Ingest directly from telescope FITS file (auto-detects SCI, PSF, RMS/WHT and header metadata)
+pipeline = sl.SubLensPipeline.from_fits("sdss_j0946_hst_f814w.fits", device="auto")
+result = pipeline.fit(
+    macro_model={"theta_E": 1.43, "q": 0.77, "phi": -1.18, "gamma": 2.16}
+)
+
+# Option B: In-memory arrays with explicit instrument specifications
 pipeline = sl.SubLensPipeline(
     z_l=0.222,          # Host lens redshift (set None for scale-free mode)
     z_s=0.609,          # Source redshift (set None for scale-free mode)
     pixel_scale=0.05,   # Arcsec / pixel (e.g. Euclid VIS / HST)
     device="auto"       # Automatically selects CUDA / Apple MPS / CPU
 )
-
-# 2. Automated Inversion: Macro Fit -> Radar Blind Scan -> PINN Refinement
 result = pipeline.fit(
     image=obs_image,
     macro_model={"theta_E": 1.43, "q": 0.77, "phi": -1.18, "gamma": 2.16}
 )
-
-# 3. Scientific Reporting and Visualization
-result.summary()
-result.plot("sublens_results.png")
-
-# Access structured attributes directly:
-print(result.subhalo_pos)              # (x, y) coordinates in arcseconds
-print(result.detection_significance)   # S in sigma
-print(result.physical_mass_solar)      # Inverted mass in M_sun (if redshifts provided)
 ```
 
-### 2. One-Line Functional Interface (`detect_subhalo`)
+### 2. Full Control: Component Extraction, Metrics & FITS Export
+Astronomers have complete control over raw arrays, quantitative metrics, and visualization:
+
+```python
+# 1. Quantitative Performance Metrics Dictionary
+metrics = result.metrics
+print(metrics["subhalo_pos_arcsec"])       # (-0.651, 1.040)
+print(metrics["detection_significance_s"])  # 240.7 sigma
+print(metrics["chi2_red_initial"])          # 8.42 (macro residual defect)
+print(metrics["chi2_red_final"])            # 1.02 (noise limit after PINN)
+print(metrics["delta_chi2"])                # Improvement across the lens plane
+
+# 2. Extract Raw 2D Data Arrays (as numpy.ndarray or torch.Tensor)
+source_plane_2d = result.get_source(format="numpy")
+model_image_2d  = result.get_model_image()
+residual_2d     = result.get_residual_image()
+macro_defect_2d = result.get_macro_residual()
+radar_s_map_2d  = result.get_radar_map()
+subhalo_kappa   = result.get_subhalo_convergence()
+
+# 3. Individual Component Publication Figures
+result.plot_macro_residual(save_path="macro_defect.png")
+result.plot_radar_map(save_path="radar_s_map.png")
+result.plot_final_model(save_path="final_model.png")
+result.plot_final_residual(save_path="final_residual.png")
+result.plot_reconstructed_source(save_path="reconstructed_source.png")
+result.plot_subhalo_convergence(save_path="subhalo_kappa.png")
+
+# 4. Export Complete Inversion Products to Multi-Extension FITS (for DS9 / Aladin)
+result.save_fits("sdss_j0946_inversion_products.fits")
+```
+
+### 3. One-Line Functional Interface (`detect_subhalo`)
 ```python
 import sublens as sl
 
 result = sl.detect_subhalo(
-    image=obs_image,
-    macro_model=macro_deflection_field,
+    image="sdss_j0946_hst_f814w.fits",  # Accepts FITS path or 2D array
+    macro_model={"theta_E": 1.43, "q": 0.77, "phi": -1.18, "gamma": 2.16},
     z_l=0.222,
     z_s=0.609
 )
@@ -153,6 +180,7 @@ Euclid/
 │
 ├── sublens/                    # Main SubLens package source code
 │   ├── __init__.py             # Unified public exports
+│   ├── pipeline.py             # High-level SubLensPipeline, SubLensResult, FITS I/O
 │   ├── cosmology.py            # Redshift-aware and scale-free cosmology engine
 │   ├── profiles/               # Gravitational lensing mass distributions
 │   │   ├── __init__.py
@@ -161,6 +189,7 @@ Euclid/
 │   ├── simulation/             # Forward modeling & synthetic generation
 │   │   ├── __init__.py
 │   │   ├── simulator.py        # Ray tracing, rendering, PSF convolution, noise
+│   │   ├── hst.py              # Realistic HST ACS TinyTim PSF & noise generators
 │   │   ├── sources.py          # Parametric Sersic & complex non-parametric galaxies
 │   │   └── benchmarks.py       # SDSS J0946, JVAS B1938, Scale-Free benchmarks
 │   ├── inversion/              # Three-stage inversion architecture
@@ -174,9 +203,10 @@ Euclid/
 │   └── utils/                  # Evaluation & visualization utilities
 │       ├── __init__.py
 │       ├── metrics.py          # Astrometric errors, PSNR, SSIM, chi2_red
-│       └── visualization.py    # 8-panel publication diagnostic plotting
+│       └── visualization.py    # Publication diagnostic & component plotting
 │
 ├── examples/                   # Runnable end-to-end demonstration scripts
+│   ├── demo_fits_and_component_controls.py # FITS I/O, component extraction & plotting
 │   ├── demo_with_redshift.py   # SDSS J0946+5106 Nature benchmark demo
 │   ├── demo_without_redshift.py# Scale-free / unknown redshift demo
 │   └── demo_lenstronomy_benchmark.py # SOTA Lenstronomy comparison demo
@@ -184,7 +214,9 @@ Euclid/
 └── tests/                      # Automated unit test suite
     ├── test_cosmology.py       # Cosmology roundtrip & scale-free tests
     ├── test_profiles.py        # Profiles, deflections & autograd tests
-    └── test_inversion.py       # Forward simulator & metrics tests
+    ├── test_inversion.py       # Forward simulator & metrics tests
+    ├── test_api.py             # High-level pipeline API tests
+    └── test_fits_and_components.py # FITS loading, component extraction, FITS export tests
 ```
 
 ---
@@ -230,7 +262,19 @@ Outputs:
 - Evaluates the analytical mass degeneracy family $M_{\rm sub}(z_l, z_s)$.
 - Diagnostic plot saved to `demo_without_redshift_results.png`.
 
-### 3. Direct Lenstronomy Benchmarking
+### 3. FITS Data Ingestion, Component Extraction & Exporter
+Demonstrate multi-extension FITS loading, 2D array extraction, individual component plotting, and FITS product generation:
+```bash
+python examples/demo_fits_and_component_controls.py
+```
+Outputs:
+- Generates or reads HST FITS with realistic PSF and noise maps.
+- Performs end-to-end blind subhalo detection.
+- Extracts raw 2D arrays (`result.get_source()`, `result.get_model_image()`, etc.) and prints `result.metrics`.
+- Saves publication-ready individual component figures to `component_plots/`.
+- Exports all reconstructed 2D planes to standard multi-extension FITS `sdss_j0946_inversion_products.fits`.
+
+### 4. Direct Lenstronomy Benchmarking
 Compare SubLens against traditional SOTA sampling:
 ```bash
 python examples/demo_lenstronomy_benchmark.py

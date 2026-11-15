@@ -2,21 +2,25 @@
 High-Level Unified API for SubLens.
 
 Provides user-friendly, production-ready interfaces:
-- SubLensPipeline: End-to-end detection and inversion pipeline
-- SubLensResult: Rich container holding detection metrics, plots, and summaries
+- SubLensPipeline: End-to-end detection and inversion pipeline supporting FITS files and arrays
+- SubLensResult: Rich container holding detection metrics, component extractors, plotting, and FITS export
 - detect_subhalo(): Functional entrypoint for quick analysis
 """
 
+import os
 import time
 import math
-from typing import Dict, Any, Tuple, Optional, Union
+from typing import Dict, Any, Tuple, Optional, Union, List
 import torch
 import torch.nn as nn
 import numpy as np
+import matplotlib.pyplot as plt
+from astropy.io import fits
 
 from .cosmology import LensingCosmology
 from .simulation.simulator import LensingSimulator
 from .profiles.macro import epl_deflection, external_shear_deflection
+from .profiles.subhalo import nfw_subhalo_deflection, sis_subhalo_deflection
 from .inversion.macro_fitter import MacroFitter
 from .inversion.radar import AstrometricRadar
 from .inversion.pinn_optimizer import PINNOptimizer
@@ -24,8 +28,108 @@ from .utils.metrics import compute_astrometric_error, compute_image_metrics
 from .utils.visualization import plot_diagnostic_figure
 
 
+def _parse_fits_input(
+    image_input: Union[str, np.ndarray, torch.Tensor],
+    psf_input: Optional[Union[str, np.ndarray, torch.Tensor]] = None,
+    noise_input: Optional[Union[str, np.ndarray, torch.Tensor]] = None
+) -> Tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray], Dict[str, Any]]:
+    """
+    Parses flexible inputs:
+    - Single multi-extension FITS file containing SCI, PSF, and RMS/WHT
+    - Separate FITS files for image, psf, noise
+    - In-memory numpy arrays or torch tensors
+    Returns: (image_2d, psf_2d, noise_map_2d, header_meta)
+    """
+    header_meta = {}
+    image_arr = None
+    psf_arr = None
+    noise_arr = None
+
+    # 1. Parse image input
+    if isinstance(image_input, str):
+        if not os.path.exists(image_input):
+            raise FileNotFoundError(f"FITS file not found: {image_input}")
+        with fits.open(image_input) as hdul:
+            ext_names = [h.name.upper() for h in hdul]
+            # Science image
+            if 'SCI' in ext_names:
+                image_arr = hdul['SCI'].data.astype(np.float32)
+                hdr = hdul['SCI'].header
+            else:
+                image_arr = hdul[0].data.astype(np.float32)
+                hdr = hdul[0].header
+
+            # Extract header metadata
+            header_meta['PIXSCALE'] = hdr.get('PIXSCALE', hdr.get('CD1_1', hdr.get('CDELT1', None)))
+            if header_meta['PIXSCALE'] is not None:
+                header_meta['PIXSCALE'] = abs(float(header_meta['PIXSCALE']))
+            header_meta['EXPTIME'] = hdr.get('EXPTIME', None)
+            header_meta['FILTER'] = hdr.get('FILTER', None)
+            header_meta['TELESCOP'] = hdr.get('TELESCOP', None)
+            header_meta['Z_LENS'] = hdr.get('Z_LENS', None)
+            header_meta['Z_SOURCE'] = hdr.get('Z_SOURCE', None)
+
+            # Auto-detect bundled PSF from single multi-extension FITS if not explicitly given
+            if psf_input is None and 'PSF' in ext_names:
+                psf_arr = hdul['PSF'].data.astype(np.float32)
+
+            # Auto-detect bundled Noise/RMS/WHT from single multi-extension FITS if not explicitly given
+            if noise_input is None:
+                if 'RMS' in ext_names:
+                    noise_arr = hdul['RMS'].data.astype(np.float32)
+                elif 'WHT' in ext_names:
+                    wht = hdul['WHT'].data.astype(np.float32)
+                    noise_arr = np.where(wht > 1e-12, 1.0 / np.sqrt(np.maximum(wht, 1e-12)), 1.0)
+                elif 'VAR' in ext_names:
+                    noise_arr = np.sqrt(np.maximum(hdul['VAR'].data.astype(np.float32), 1e-12))
+    elif isinstance(image_input, torch.Tensor):
+        image_arr = image_input.squeeze().cpu().numpy().astype(np.float32)
+    elif isinstance(image_input, np.ndarray):
+        image_arr = image_input.squeeze().astype(np.float32)
+    else:
+        raise TypeError(f"Unsupported image type: {type(image_input)}")
+
+    # 2. Parse separate PSF input if provided
+    if psf_input is not None:
+        if isinstance(psf_input, str):
+            with fits.open(psf_input) as hdul:
+                ext_names = [h.name.upper() for h in hdul]
+                if 'PSF' in ext_names:
+                    psf_arr = hdul['PSF'].data.astype(np.float32)
+                else:
+                    psf_arr = hdul[0].data.astype(np.float32)
+        elif isinstance(psf_input, torch.Tensor):
+            psf_arr = psf_input.squeeze().cpu().numpy().astype(np.float32)
+        elif isinstance(psf_input, np.ndarray):
+            psf_arr = psf_input.squeeze().astype(np.float32)
+
+    # 3. Parse separate Noise input if provided
+    if noise_input is not None:
+        if isinstance(noise_input, str):
+            with fits.open(noise_input) as hdul:
+                ext_names = [h.name.upper() for h in hdul]
+                if 'RMS' in ext_names:
+                    noise_arr = hdul['RMS'].data.astype(np.float32)
+                elif 'WHT' in ext_names:
+                    wht = hdul['WHT'].data.astype(np.float32)
+                    noise_arr = np.where(wht > 1e-12, 1.0 / np.sqrt(np.maximum(wht, 1e-12)), 1.0)
+                elif 'VAR' in ext_names:
+                    noise_arr = np.sqrt(np.maximum(hdul['VAR'].data.astype(np.float32), 1e-12))
+                else:
+                    noise_arr = hdul[0].data.astype(np.float32)
+        elif isinstance(noise_input, torch.Tensor):
+            noise_arr = noise_input.squeeze().cpu().numpy().astype(np.float32)
+        elif isinstance(noise_input, np.ndarray):
+            noise_arr = noise_input.squeeze().astype(np.float32)
+
+    return image_arr, psf_arr, noise_arr, header_meta
+
+
 class SubLensResult:
-    """Rich container storing all inversion artifacts, parameters, and metrics."""
+    """
+    Rich container holding detection outputs, extracted data arrays,
+    individual component plots, performance metrics, and FITS exporter.
+    """
 
     def __init__(self, data: Dict[str, Any]):
         self._data = data
@@ -34,6 +138,7 @@ class SubLensResult:
         self.detection_significance: float = data["radar_score"]
         self.reduced_chi2_initial: float = data["chi2_macro"]
         self.reduced_chi2_final: float = data["chi2_final"]
+        self.delta_chi2: float = self.reduced_chi2_initial - self.reduced_chi2_final
         self.elapsed_time: float = data["total_elapsed_time"]
         self.has_redshifts: bool = data["has_redshifts"]
         self.z_l: Optional[float] = data.get("z_l")
@@ -44,12 +149,261 @@ class SubLensResult:
         self.physical_mass_solar: Optional[float] = data.get("physical_mass_solar")
         self.relative_mass_ratio: Optional[float] = data.get("relative_mass_ratio")
 
-        # Tensors
-        self.reconstructed_source: torch.Tensor = data["reconstructed_source"]
-        self.modeled_image: torch.Tensor = data["pred_final"]
-        self.residual_image: torch.Tensor = data["res_final"]
-        self.radar_score_map: torch.Tensor = data["radar_score_map"]
+        # Internal references
+        self._sim = data["simulator"]
+        self._reconstructed_source: torch.Tensor = data["reconstructed_source"]
+        self._modeled_image: torch.Tensor = data["pred_final"]
+        self._residual_image: torch.Tensor = data["res_final"]
+        self._radar_score_map: torch.Tensor = data["radar_score_map"]
+        self._macro_residual: torch.Tensor = data["res_macro"]
+        self._obs_image: torch.Tensor = data["obs_image"]
 
+    # ----------------------------------------------------------------------------------
+    # 1. Performance Metrics Property
+    # ----------------------------------------------------------------------------------
+    @property
+    def metrics(self) -> Dict[str, Any]:
+        """Dictionary of quantitative astronomical performance and accuracy metrics."""
+        return {
+            "subhalo_pos_arcsec": (float(self.subhalo_pos[0]), float(self.subhalo_pos[1])),
+            "subhalo_x_arcsec": float(self.subhalo_pos[0]),
+            "subhalo_y_arcsec": float(self.subhalo_pos[1]),
+            "radar_candidate_arcsec": (float(self.radar_candidate_pos[0]), float(self.radar_candidate_pos[1])),
+            "detection_significance_sigma": float(self.detection_significance),
+            "chi2_reduced_initial": float(self.reduced_chi2_initial),
+            "chi2_reduced_final": float(self.reduced_chi2_final),
+            "delta_chi2_reduced": float(self.delta_chi2),
+            "physical_mass_solar": self.physical_mass_solar,
+            "theta_E_sub_arcsec": float(self.theta_E_sub),
+            "relative_mass_ratio": self.relative_mass_ratio,
+            "astrometric_error_mas": float(self._data.get("error_mas", 0.0)),
+            "source_psnr_db": float(self._data.get("psnr_db", 0.0)),
+            "source_ssim": float(self._data.get("ssim", 0.0)),
+            "elapsed_seconds": float(self.elapsed_time),
+            "has_redshifts": self.has_redshifts,
+            "z_lens": self.z_l,
+            "z_source": self.z_s
+        }
+
+    # ----------------------------------------------------------------------------------
+    # 2. Data Extraction Methods (Numpy / Torch)
+    # ----------------------------------------------------------------------------------
+    def get_source(self, format: str = "numpy") -> Union[np.ndarray, torch.Tensor]:
+        """Extracts the 2D reconstructed pixelated source plane."""
+        src = self._reconstructed_source.squeeze()
+        return src.cpu().numpy() if format.lower() == "numpy" else src
+
+    def get_model_image(self, format: str = "numpy") -> Union[np.ndarray, torch.Tensor]:
+        """Extracts the 2D inverted forward model image (macro + subhalo + PSF)."""
+        mod = self._modeled_image.squeeze()
+        return mod.cpu().numpy() if format.lower() == "numpy" else mod
+
+    def get_residual_image(self, format: str = "numpy") -> Union[np.ndarray, torch.Tensor]:
+        """Extracts the 2D final annihilated image residual (obs - model)."""
+        res = self._residual_image.squeeze()
+        return res.cpu().numpy() if format.lower() == "numpy" else res
+
+    def get_macro_residual(self, format: str = "numpy") -> Union[np.ndarray, torch.Tensor]:
+        """Extracts the 2D smooth macro baseline residual exposing the defect."""
+        res = self._macro_residual.squeeze()
+        return res.cpu().numpy() if format.lower() == "numpy" else res
+
+    def get_radar_map(self, format: str = "numpy") -> Tuple[Union[np.ndarray, torch.Tensor], List[float]]:
+        """Extracts the 2D Astrometric Radar score map and celestial extent [xmin, xmax, ymin, ymax]."""
+        smap = self._radar_score_map
+        extent = self._data["radar_extent"]
+        return (smap.cpu().numpy() if format.lower() == "numpy" else smap), extent
+
+    def get_observation_image(self, format: str = "numpy") -> Union[np.ndarray, torch.Tensor]:
+        """Extracts the 2D input observation image."""
+        obs = self._obs_image.squeeze()
+        return obs.cpu().numpy() if format.lower() == "numpy" else obs
+
+    def get_subhalo_convergence(self, format: str = "numpy") -> Union[np.ndarray, torch.Tensor]:
+        """Computes and extracts the 2D convergence field kappa_sub(theta) of the fitted subhalo."""
+        device = self._obs_image.device
+        sub_center = torch.tensor(self.subhalo_pos, device=device)
+        k_val = torch.tensor(self._data.get("final_kappa_s", 0.35), device=device)
+        r_s_val = self._data.get("sub_theta_s", 0.15)
+        _, kappa_sub = nfw_subhalo_deflection(self._sim.theta_grid, center=sub_center, kappa_s=k_val, r_s=r_s_val)
+        kappa_2d = kappa_sub.view(self._sim.N_img, self._sim.N_img)
+        return kappa_2d.cpu().numpy() if format.lower() == "numpy" else kappa_2d
+
+    # ----------------------------------------------------------------------------------
+    # 3. Individual Component Plotting Methods
+    # ----------------------------------------------------------------------------------
+    def plot_component(
+        self,
+        component_name: str,
+        save_path: Optional[str] = None,
+        cmap: Optional[str] = None,
+        dpi: int = 300
+    ) -> plt.Figure:
+        """
+        Plots an individual component image:
+        - 'observation'
+        - 'macro_residual'
+        - 'radar_map'
+        - 'model'
+        - 'final_residual'
+        - 'source'
+        - 'subhalo_kappa'
+        """
+        fig, ax = plt.subplots(figsize=(6, 5))
+        c_name = component_name.lower().strip()
+
+        if c_name in ['observation', 'obs']:
+            data = self.get_observation_image()
+            im = ax.imshow(data, origin='lower', extent=self._sim.extent_img, cmap=cmap or 'inferno')
+            ax.set_title("Observed Lens Image (SCI)", fontsize=11, fontweight='bold')
+            ax.set_xlabel("Arcsec")
+            ax.set_ylabel("Arcsec")
+        elif c_name in ['macro_residual', 'defect']:
+            data = self.get_macro_residual()
+            vmax = max(abs(data.min()), abs(data.max()))
+            im = ax.imshow(data, origin='lower', extent=self._sim.extent_img, cmap=cmap or 'RdBu_r', vmin=-vmax, vmax=vmax)
+            ax.scatter([self.subhalo_pos[0]], [self.subhalo_pos[1]], marker='+', color='black', s=120, label='Subhalo Location')
+            ax.set_title(f"Smooth Macro Residual (No Subhalo)\nchi_red^2 = {self.reduced_chi2_initial:.2f}", fontsize=11, fontweight='bold')
+            ax.set_xlabel("Arcsec")
+            ax.set_ylabel("Arcsec")
+            ax.legend(loc='lower left', fontsize=9)
+        elif c_name in ['radar_map', 'radar', 'smap']:
+            data, extent = self.get_radar_map()
+            im = ax.imshow(data, origin='lower', extent=extent, cmap=cmap or 'viridis')
+            ax.scatter([self.radar_candidate_pos[0]], [self.radar_candidate_pos[1]], color='yellow', marker='*', s=220, edgecolors='black', label=f"Peak S = {self.detection_significance:.1f} sigma")
+            ax.set_title(f"Astrometric Radar Response Map\nPeak S = {self.detection_significance:.1f} sigma", fontsize=11, fontweight='bold')
+            ax.set_xlabel("Arcsec")
+            ax.set_ylabel("Arcsec")
+            ax.legend(loc='lower left', fontsize=9)
+        elif c_name in ['model', 'final_model']:
+            data = self.get_model_image()
+            im = ax.imshow(data, origin='lower', extent=self._sim.extent_img, cmap=cmap or 'inferno')
+            ax.scatter([self.subhalo_pos[0]], [self.subhalo_pos[1]], facecolors='none', edgecolors='lime', s=160, linewidth=2, label='Inverted Subhalo')
+            ax.set_title("Final Joint Inverted Model Image", fontsize=11, fontweight='bold')
+            ax.set_xlabel("Arcsec")
+            ax.set_ylabel("Arcsec")
+            ax.legend(loc='lower left', fontsize=9)
+        elif c_name in ['final_residual', 'residual']:
+            data = self.get_residual_image()
+            vmax = max(abs(data.min()), abs(data.max()))
+            im = ax.imshow(data, origin='lower', extent=self._sim.extent_img, cmap=cmap or 'RdBu_r', vmin=-vmax, vmax=vmax)
+            ax.set_title(f"Final Inversion Residual\nchi_red^2 = {self.reduced_chi2_final:.2f} (Noise Limit)", fontsize=11, fontweight='bold')
+            ax.set_xlabel("Arcsec")
+            ax.set_ylabel("Arcsec")
+        elif c_name in ['source', 'reconstructed_source']:
+            data = self.get_source()
+            im = ax.imshow(data, origin='lower', extent=self._sim.extent_src, cmap=cmap or 'magma')
+            ax.set_title("Reconstructed Source Galaxy (TV Regularized)", fontsize=11, fontweight='bold')
+            ax.set_xlabel("Arcsec")
+            ax.set_ylabel("Arcsec")
+        elif c_name in ['subhalo_kappa', 'kappa']:
+            data = self.get_subhalo_convergence()
+            im = ax.imshow(data, origin='lower', extent=self._sim.extent_img, cmap=cmap or 'plasma')
+            ax.scatter([self.subhalo_pos[0]], [self.subhalo_pos[1]], color='cyan', marker='x', s=140, label=f"Center: ({self.subhalo_pos[0]:+.3f}\", {self.subhalo_pos[1]:+.3f}\")")
+            ax.set_title("Fitted Dark Matter Subhalo Convergence kappa_sub", fontsize=11, fontweight='bold')
+            ax.set_xlabel("Arcsec")
+            ax.set_ylabel("Arcsec")
+            ax.legend(loc='lower left', fontsize=9)
+        else:
+            plt.close()
+            raise ValueError(f"Unknown component: '{component_name}'. Choose from: 'observation', 'macro_residual', 'radar_map', 'model', 'final_residual', 'source', 'subhalo_kappa'")
+
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=dpi)
+            print(f">>> Component plot [{component_name}] saved to: {save_path}")
+            plt.close()
+        return fig
+
+    def plot_macro_residual(self, save_path: str = "macro_residual.png"):
+        """Saves dedicated smooth macro residual plot exposing the defect."""
+        return self.plot_component("macro_residual", save_path=save_path)
+
+    def plot_radar_map(self, save_path: str = "radar_smap.png"):
+        """Saves dedicated Astrometric Radar S-map plot."""
+        return self.plot_component("radar_map", save_path=save_path)
+
+    def plot_final_model(self, save_path: str = "final_model.png"):
+        """Saves dedicated final joint inverted model image plot."""
+        return self.plot_component("model", save_path=save_path)
+
+    def plot_final_residual(self, save_path: str = "final_residual.png"):
+        """Saves dedicated final residual plot showing defect annihilation."""
+        return self.plot_component("final_residual", save_path=save_path)
+
+    def plot_reconstructed_source(self, save_path: str = "reconstructed_source.png"):
+        """Saves dedicated TV-regularized reconstructed source galaxy plot."""
+        return self.plot_component("source", save_path=save_path)
+
+    def plot_subhalo_convergence(self, save_path: str = "subhalo_convergence.png"):
+        """Saves dedicated dark matter subhalo convergence field plot."""
+        return self.plot_component("subhalo_kappa", save_path=save_path)
+
+    # ----------------------------------------------------------------------------------
+    # 4. Multi-Extension FITS Exporter
+    # ----------------------------------------------------------------------------------
+    def save_fits(self, save_path: str = "sublens_inversion_results.fits", overwrite: bool = True):
+        """
+        Exports all inversion outputs to a standard Multi-Extension FITS file:
+        - HDU 0: MODEL (Inverted lens image)
+        - HDU 1: RESIDUAL (Final data - model residual)
+        - HDU 2: SOURCE (Reconstructed source plane)
+        - HDU 3: RADAR_SMAP (Astrometric radar score map)
+        - HDU 4: SUBHALO_KAPPA (Subhalo 2D convergence field)
+        - Header keywords containing all converged parameters, astrometry, and chi-squared metrics.
+        """
+        hdr = fits.Header()
+        hdr['TELESCOP'] = ('SubLens', 'Gravitational Lensing Inversion Pipeline')
+        hdr['SUB_X']    = (float(self.subhalo_pos[0]), 'Fitted subhalo X (arcsec)')
+        hdr['SUB_Y']    = (float(self.subhalo_pos[1]), 'Fitted subhalo Y (arcsec)')
+        hdr['RADAR_S']  = (float(self.detection_significance), 'Radar detection score (sigma)')
+        hdr['CHI2_INI'] = (float(self.reduced_chi2_initial), 'Smooth macro reduced chi-squared')
+        hdr['CHI2_FIN'] = (float(self.reduced_chi2_final), 'Final inverted reduced chi-squared')
+        hdr['DEL_CHI2'] = (float(self.delta_chi2), 'Chi-squared improvement')
+        hdr['THETA_E']  = (float(self.theta_E_sub), 'Inverted subhalo theta_E (arcsec)')
+
+        if self.has_redshifts:
+            hdr['Z_LENS']   = (float(self.z_l), 'Host lens redshift')
+            hdr['Z_SOURCE'] = (float(self.z_s), 'Source galaxy redshift')
+            if self.physical_mass_solar is not None:
+                hdr['M_SOLAR']  = (float(self.physical_mass_solar), 'Inverted subhalo physical mass (M_sun)')
+        else:
+            hdr['Z_LENS']   = (-1.0, 'Unknown redshift (scale-free)')
+            hdr['Z_SOURCE'] = (-1.0, 'Unknown redshift (scale-free)')
+            if self.relative_mass_ratio is not None:
+                hdr['F_SUB']    = (float(self.relative_mass_ratio), 'Relative mass ratio f_sub')
+
+        # HDUs
+        hdu_model = fits.PrimaryHDU(data=self.get_model_image(), header=hdr)
+        hdu_model.header['EXTNAME'] = 'MODEL'
+        hdu_model.header['COMMENT'] = 'Best-fit forward modeled lens image'
+
+        hdu_res = fits.ImageHDU(data=self.get_residual_image())
+        hdu_res.header['EXTNAME'] = 'RESIDUAL'
+        hdu_res.header['COMMENT'] = 'Final data - model image residual'
+
+        hdu_src = fits.ImageHDU(data=self.get_source())
+        hdu_src.header['EXTNAME'] = 'SOURCE'
+        hdu_src.header['COMMENT'] = 'Reconstructed TV-regularized source plane'
+
+        smap, _ = self.get_radar_map()
+        hdu_radar = fits.ImageHDU(data=smap)
+        hdu_radar.header['EXTNAME'] = 'RADAR_SMAP'
+        hdu_radar.header['COMMENT'] = 'Astrometric matched filter S-score map (sigma)'
+
+        hdu_kappa = fits.ImageHDU(data=self.get_subhalo_convergence())
+        hdu_kappa.header['EXTNAME'] = 'SUBHALO_KAPPA'
+        hdu_kappa.header['COMMENT'] = 'Fitted dark matter subhalo convergence field'
+
+        hdul = fits.HDUList([hdu_model, hdu_res, hdu_src, hdu_radar, hdu_kappa])
+        hdul.writeto(save_path, overwrite=overwrite)
+        print(f">>> Full inversion results exported to FITS: {save_path}")
+
+    # ----------------------------------------------------------------------------------
+    # 5. Reporting and Full Overview Plotting
+    # ----------------------------------------------------------------------------------
     def summary(self) -> str:
         """Prints and returns a formatted scientific report of the detection."""
         lines = []
@@ -60,7 +414,7 @@ class SubLensResult:
         lines.append(f"Radar Blind Candidate: ({self.radar_candidate_pos[0]:+.4f}\", {self.radar_candidate_pos[1]:+.4f}\")")
         lines.append(f"Radar Detection Significance: {self.detection_significance:.2f} sigma")
         lines.append(f"PINN Converged Position: ({self.subhalo_pos[0]:+.4f}\", {self.subhalo_pos[1]:+.4f}\")")
-        lines.append(f"Reduced Chi-Square: {self.reduced_chi2_initial:.2f} -> {self.reduced_chi2_final:.2f} (Delta chi^2 = {self.reduced_chi2_initial - self.reduced_chi2_final:.2f})")
+        lines.append(f"Reduced Chi-Square: {self.reduced_chi2_initial:.2f} -> {self.reduced_chi2_final:.2f} (Delta chi^2 = {self.delta_chi2:.2f})")
 
         if self.has_redshifts:
             lines.append(f"Cosmology: z_lens = {self.z_l:.3f}, z_source = {self.z_s:.3f}")
@@ -78,17 +432,24 @@ class SubLensResult:
         print(report)
         return report
 
-    def plot(self, save_path: str = "sublens_detection_results.png", dpi: int = 300):
-        """Generates the 8-panel diagnostic publication figure."""
+    def plot(self, save_path: str = "sublens_detection_results.png", component: Optional[str] = None, dpi: int = 300):
+        """
+        Plots either:
+        - An individual component if `component` is given (e.g. 'residual', 'radar', 'source', 'model')
+        - The complete 8-panel diagnostic overview figure if `component` is None.
+        """
+        if component is not None:
+            return self.plot_component(component, save_path=save_path, dpi=dpi)
+
         plot_dict = {
-            "simulator": self._data["simulator"],
-            "obs_image": self._data["obs_image"],
-            "res_macro": self._data["res_macro"],
-            "res_final": self.residual_image,
-            "pred_final": self.modeled_image,
-            "source_true": self._data.get("source_true", self.reconstructed_source),
-            "source_final": self.reconstructed_source,
-            "radar_scores": self.radar_score_map,
+            "simulator": self._sim,
+            "obs_image": self._obs_image,
+            "res_macro": self._macro_residual,
+            "res_final": self._residual_image,
+            "pred_final": self._modeled_image,
+            "source_true": self._data.get("source_true", self._reconstructed_source),
+            "source_final": self._reconstructed_source,
+            "radar_scores": self._radar_score_map,
             "radar_extent": self._data["radar_extent"],
             "sub_true_pos": self._data.get("sub_true_pos", self.subhalo_pos),
             "radar_pos": self.radar_candidate_pos,
@@ -102,55 +463,32 @@ class SubLensResult:
             "title": "SubLens Pipeline Inversion"
         }
         plot_diagnostic_figure(plot_dict, save_path=save_path, dpi=dpi)
-        print(f">>> Diagnostic figure saved to: {save_path}")
+        print(f">>> 8-panel diagnostic overview saved to: {save_path}")
 
     def to_dict(self) -> Dict[str, Any]:
         """Exports detection parameters as a serializable dictionary."""
-        return {
-            "subhalo_pos_arcsec": self.subhalo_pos,
-            "radar_candidate_arcsec": self.radar_candidate_pos,
-            "detection_significance_sigma": self.detection_significance,
-            "reduced_chi2_initial": self.reduced_chi2_initial,
-            "reduced_chi2_final": self.reduced_chi2_final,
-            "physical_mass_solar": self.physical_mass_solar,
-            "theta_E_sub_arcsec": self.theta_E_sub,
-            "relative_mass_ratio": self.relative_mass_ratio,
-            "has_redshifts": self.has_redshifts,
-            "z_l": self.z_l,
-            "z_s": self.z_s,
-            "elapsed_seconds": self.elapsed_time
-        }
+        return self.metrics
 
 
 class SubLensPipeline:
     """
     High-Level End-to-End Gravitational Lensing Inversion & Subhalo Pipeline.
 
-    Parameters:
-    -----------
-    z_l : Optional[float]
-        Host lens galaxy redshift (e.g. 0.222). If None, enters scale-free regime.
-    z_s : Optional[float]
-        Background source galaxy redshift (e.g. 0.609). If None, enters scale-free regime.
-    pixel_scale : float
-        Detector pixel scale in arcseconds per pixel (default 0.05).
-    psf_fwhm : float
-        Instrument Point Spread Function FWHM in arcseconds (default 0.09).
-    noise_std : float
-        Estimated background noise standard deviation (default 0.012).
-    device : str
-        Computation backend: 'auto' (selects MPS/CUDA/CPU), 'cuda', 'mps', or 'cpu'.
+    Supports:
+    - FITS input files (single multi-extension FITS or separate files for SCI, PSF, RMS)
+    - In-memory NumPy arrays and PyTorch tensors
+    - Redshift-aware and redshift-agnostic modes
     """
 
     def __init__(
         self,
         z_l: Optional[float] = None,
         z_s: Optional[float] = None,
-        pixel_scale: float = 0.05,
+        pixel_scale: Optional[float] = None,
         psf_fwhm: float = 0.09,
         noise_std: float = 0.012,
-        psf_kernel: Optional[Union[torch.Tensor, np.ndarray]] = None,
-        noise_map: Optional[Union[torch.Tensor, np.ndarray]] = None,
+        psf_kernel: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
+        noise_map: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
         N_img: int = 120,
         N_src: int = 64,
         L_src: float = 1.8,
@@ -171,22 +509,75 @@ class SubLensPipeline:
         self.has_redshifts = (z_l is not None and z_s is not None)
         self.cosmology = LensingCosmology(z_l=z_l, z_s=z_s)
 
+        # Parse potential FITS paths in psf_kernel or noise_map
+        parsed_psf = None
+        if psf_kernel is not None:
+            _, parsed_psf, _, _ = _parse_fits_input(psf_kernel)
+
+        parsed_noise = None
+        if noise_map is not None:
+            _, _, parsed_noise, _ = _parse_fits_input(noise_map)
+
+        self.default_pixel_scale = pixel_scale or 0.05
+        self.psf_fwhm = psf_fwhm
+        self.noise_std = noise_std
+        self.N_img = N_img
+        self.N_src = N_src
+        self.L_src = L_src
+        self.psf_kernel_input = parsed_psf
+        self.noise_map_input = parsed_noise
+
         self.simulator = LensingSimulator(
             N_img=N_img,
-            pixel_scale=pixel_scale,
+            pixel_scale=self.default_pixel_scale,
             N_src=N_src,
             L_src=L_src,
             psf_fwhm=psf_fwhm,
             noise_std=noise_std,
-            psf_kernel=psf_kernel,
-            noise_map=noise_map,
+            psf_kernel=self.psf_kernel_input,
+            noise_map=self.noise_map_input,
             device=self.device
+        )
+
+    @classmethod
+    def from_fits(
+        cls,
+        fits_path: str,
+        psf_path: Optional[str] = None,
+        noise_path: Optional[str] = None,
+        z_l: Optional[float] = None,
+        z_s: Optional[float] = None,
+        device: str = "auto",
+        **kwargs
+    ) -> "SubLensPipeline":
+        """
+        Factory method to initialize SubLensPipeline directly from a FITS file.
+        Automatically parses PIXSCALE, Z_LENS, Z_SOURCE, PSF, and RMS maps if present.
+        """
+        img_data, psf_data, noise_data, meta = _parse_fits_input(fits_path, psf_path, noise_path)
+
+        pix_scale = meta.get('PIXSCALE') or kwargs.get('pixel_scale', 0.05)
+        zl_val = z_l if z_l is not None else meta.get('Z_LENS')
+        zs_val = z_s if z_s is not None else meta.get('Z_SOURCE')
+        n_img = img_data.shape[0]
+
+        return cls(
+            z_l=zl_val,
+            z_s=zs_val,
+            pixel_scale=pix_scale,
+            psf_kernel=psf_data,
+            noise_map=noise_data,
+            N_img=n_img,
+            device=device,
+            **kwargs
         )
 
     def fit(
         self,
-        image: Union[torch.Tensor, np.ndarray],
+        image: Union[str, torch.Tensor, np.ndarray],
         macro_model: Union[torch.Tensor, Dict[str, Any]],
+        psf_kernel: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
+        noise_map: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
         subhalo_type: str = "NFW",
         radar_resolution: int = 45,
         r_min: Optional[float] = None,
@@ -205,18 +596,30 @@ class SubLensPipeline:
         """
         t0 = time.time()
 
-        # Format input image tensor
-        if isinstance(image, np.ndarray):
-            image_tensor = torch.tensor(image, dtype=torch.float32, device=self.device)
-        else:
-            image_tensor = image.to(self.device)
+        # Parse FITS / Array inputs
+        img_arr, psf_arr, noise_arr, meta = _parse_fits_input(image, psf_kernel, noise_map)
 
+        # Update simulator if custom PSF or Noise map arrived with fit()
+        if psf_arr is not None or noise_arr is not None or img_arr.shape[0] != self.simulator.N_img:
+            pix_scale = meta.get('PIXSCALE') or self.simulator.pixel_scale
+            self.simulator = LensingSimulator(
+                N_img=img_arr.shape[0],
+                pixel_scale=pix_scale,
+                N_src=self.N_src,
+                L_src=self.L_src,
+                psf_fwhm=self.psf_fwhm,
+                noise_std=self.noise_std,
+                psf_kernel=psf_arr if psf_arr is not None else self.simulator.psf_kernel,
+                noise_map=noise_arr if noise_arr is not None else self.simulator.noise_map,
+                device=self.device
+            )
+
+        image_tensor = torch.tensor(img_arr, dtype=torch.float32, device=self.device)
         if image_tensor.dim() == 2:
             image_tensor = image_tensor.view(1, 1, self.simulator.N_img, self.simulator.N_img)
 
         # Format macro deflection
         if isinstance(macro_model, dict):
-            # Parametric dict: e.g. {"theta_E": 1.43, "q": 0.77, "phi": -1.18, "gamma": 2.16, "gamma_ext": 0.035, "phi_ext": -0.45}
             a_host, _ = epl_deflection(
                 self.simulator.theta_grid,
                 theta_E=macro_model.get("theta_E", 1.40),
@@ -234,7 +637,7 @@ class SubLensPipeline:
         else:
             alpha_macro = macro_model.to(self.device)
 
-        # Adapt source scale and scan range if theta_E is specified
+        # Adapt source scale and scan range
         host_theta_E = 1.40
         if isinstance(macro_model, dict) and "theta_E" in macro_model:
             host_theta_E = macro_model["theta_E"]
@@ -299,12 +702,11 @@ class SubLensPipeline:
         if self.has_redshifts:
             try:
                 physical_mass = self.cosmology.nfw_to_physical_mass(
-                    pinn_res["final_kappa_s"], theta_s=0.15
+                    pinn_res["final_kappa_s"], theta_s=init_rs
                 )
             except Exception:
                 physical_mass = None
         else:
-            host_theta_E = macro_model.get("theta_E", 1.40) if isinstance(macro_model, dict) else 1.40
             rel_ratio = (theta_E_sub / host_theta_E)**2
 
         # Optional comparison metrics if ground truth is supplied
@@ -345,7 +747,9 @@ class SubLensPipeline:
             "relative_mass_ratio": rel_ratio,
             "error_mas": err_mas,
             "psnr_db": psnr_val,
-            "ssim": ssim_val
+            "ssim": ssim_val,
+            "final_kappa_s": pinn_res.get("final_kappa_s", 0.35),
+            "sub_theta_s": init_rs
         }
         if ground_truth:
             result_dict.update(ground_truth)
@@ -358,21 +762,23 @@ class SubLensPipeline:
 
 
 def detect_subhalo(
-    image: Union[torch.Tensor, np.ndarray],
+    image: Union[str, torch.Tensor, np.ndarray],
     macro_model: Union[torch.Tensor, Dict[str, Any]],
     z_l: Optional[float] = None,
     z_s: Optional[float] = None,
-    pixel_scale: float = 0.05,
+    pixel_scale: Optional[float] = None,
     psf_fwhm: float = 0.09,
     noise_std: float = 0.012,
-    psf_kernel: Optional[Union[torch.Tensor, np.ndarray]] = None,
-    noise_map: Optional[Union[torch.Tensor, np.ndarray]] = None,
+    psf_kernel: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
+    noise_map: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
     subhalo_type: str = "NFW",
     device: str = "auto",
-    verbose: bool = True
+    verbose: bool = True,
+    **kwargs
 ) -> SubLensResult:
     """
     Convenience function for one-line subhalo detection.
+    Supports single FITS file path, separate FITS files, or NumPy arrays.
     """
     pipeline = SubLensPipeline(
         z_l=z_l,
@@ -384,4 +790,4 @@ def detect_subhalo(
         noise_map=noise_map,
         device=device
     )
-    return pipeline.fit(image, macro_model, subhalo_type=subhalo_type, verbose=verbose)
+    return pipeline.fit(image, macro_model, subhalo_type=subhalo_type, verbose=verbose, **kwargs)
