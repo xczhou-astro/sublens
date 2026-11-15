@@ -62,7 +62,9 @@ class MacroFitter:
             diff_x = torch.abs(pos_src[:, :, :, 1:] - pos_src[:, :, :, :-1])
             tv_loss = torch.mean(diff_y) + torch.mean(diff_x)
 
-            loss = F.mse_loss(pred_conv, obs_image) + self.tv_weight * tv_loss
+            # Pixel-wise chi^2 weighted loss using exact noise_map (or uniform noise_std)
+            norm_res = (pred_conv - obs_image) / self.sim.noise_map
+            loss = torch.mean(norm_res**2) + self.tv_weight * tv_loss
             loss.backward()
             opt.step()
 
@@ -71,7 +73,7 @@ class MacroFitter:
         pred_macro = self.sim.convolve_psf(pred_clean).detach()
         res_macro = obs_image - pred_macro
 
-        chi2_red = F.mse_loss(pred_macro, obs_image).item() / (self.sim.noise_std**2)
+        chi2_red = torch.mean(((pred_macro - obs_image) / self.sim.noise_map)**2).item()
 
         if verbose:
             print(f"[MacroFitter] Baseline fit finished. Reduced chi^2 = {chi2_red:.2f}")

@@ -149,6 +149,8 @@ class SubLensPipeline:
         pixel_scale: float = 0.05,
         psf_fwhm: float = 0.09,
         noise_std: float = 0.012,
+        psf_kernel: Optional[Union[torch.Tensor, np.ndarray]] = None,
+        noise_map: Optional[Union[torch.Tensor, np.ndarray]] = None,
         N_img: int = 120,
         N_src: int = 64,
         L_src: float = 1.8,
@@ -176,6 +178,8 @@ class SubLensPipeline:
             L_src=L_src,
             psf_fwhm=psf_fwhm,
             noise_std=noise_std,
+            psf_kernel=psf_kernel,
+            noise_map=noise_map,
             device=self.device
         )
 
@@ -361,6 +365,8 @@ def detect_subhalo(
     pixel_scale: float = 0.05,
     psf_fwhm: float = 0.09,
     noise_std: float = 0.012,
+    psf_kernel: Optional[Union[torch.Tensor, np.ndarray]] = None,
+    noise_map: Optional[Union[torch.Tensor, np.ndarray]] = None,
     subhalo_type: str = "NFW",
     device: str = "auto",
     verbose: bool = True
@@ -374,6 +380,8 @@ def detect_subhalo(
         pixel_scale=pixel_scale,
         psf_fwhm=psf_fwhm,
         noise_std=noise_std,
+        psf_kernel=psf_kernel,
+        noise_map=noise_map,
         device=device
     )
     return pipeline.fit(image, macro_model, subhalo_type=subhalo_type, verbose=verbose)

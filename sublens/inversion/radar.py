@@ -102,8 +102,10 @@ class AstrometricRadar:
                         F.grid_sample(source_macro, grid_c, mode='bilinear', padding_mode='zeros', align_corners=True)
                     )
                     d_I = I_cand - pred_macro
-                    norm = torch.sqrt((d_I**2).sum()) + 1e-8
-                    scores[j, i] = (res_macro * d_I).sum() / (norm * self.sim.noise_std)
+                    # Statistically optimal matched filter with pixel-wise noise map
+                    d_I_normed = d_I / self.sim.noise_map
+                    norm = torch.sqrt((d_I_normed**2).sum()) + 1e-8
+                    scores[j, i] = ((res_macro / self.sim.noise_map) * d_I_normed).sum() / norm
 
         elapsed = time.time() - t0
         scores_np = scores.cpu().numpy()

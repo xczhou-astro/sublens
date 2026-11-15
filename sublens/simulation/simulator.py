@@ -15,6 +15,7 @@ from typing import Tuple, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 
 def build_gaussian_psf(
@@ -42,6 +43,8 @@ class LensingSimulator:
         L_src: float = 1.6,
         psf_fwhm: float = 0.09,
         noise_std: float = 0.012,
+        psf_kernel: Optional[Union[torch.Tensor, np.ndarray]] = None,
+        noise_map: Optional[Union[torch.Tensor, np.ndarray]] = None,
         device: str = "cpu"
     ):
         self.N_img = N_img
@@ -67,15 +70,36 @@ class LensingSimulator:
         self.extent_img = [-self.L_img, self.L_img, -self.L_img, self.L_img]
         self.coords_1d = coords_1d
 
-        # PSF kernel
-        psf_sigma = psf_fwhm / 2.355
-        self.psf_kernel = build_gaussian_psf(
-            kernel_size=15,
-            sigma_arcsec=psf_sigma,
-            pixel_scale=pixel_scale,
-            device=self.device
-        )
+        # PSF kernel setup: Supports custom 2D matrix (from FITS/ePSF) or parametric Gaussian
+        if psf_kernel is not None:
+            if isinstance(psf_kernel, np.ndarray):
+                pk = torch.tensor(psf_kernel, dtype=torch.float32, device=self.device)
+            else:
+                pk = psf_kernel.to(self.device).float()
+            if pk.dim() == 2:
+                pk = pk.view(1, 1, pk.shape[0], pk.shape[1])
+            self.psf_kernel = pk / pk.sum()
+        else:
+            psf_sigma = psf_fwhm / 2.355
+            self.psf_kernel = build_gaussian_psf(
+                kernel_size=15,
+                sigma_arcsec=psf_sigma,
+                pixel_scale=pixel_scale,
+                device=self.device
+            )
         self.psf_pad = self.psf_kernel.shape[-1] // 2
+
+        # Noise map setup: Supports pixel-wise RMS/Weight map or uniform scalar
+        if noise_map is not None:
+            if isinstance(noise_map, np.ndarray):
+                nm = torch.tensor(noise_map, dtype=torch.float32, device=self.device)
+            else:
+                nm = noise_map.to(self.device).float()
+            if nm.dim() == 2:
+                nm = nm.view(1, 1, nm.shape[0], nm.shape[1])
+            self.noise_map = torch.clamp(nm, min=1e-6)
+        else:
+            self.noise_map = torch.full((1, 1, N_img, N_img), float(noise_std), device=self.device)
 
         # Source plane grid
         src_coords_1d = torch.linspace(-L_src, L_src, N_src, device=self.device)

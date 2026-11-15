@@ -92,7 +92,9 @@ class PINNOptimizer:
             diff_x = torch.abs(pos_src[:, :, :, 1:] - pos_src[:, :, :, :-1])
             tv_loss = torch.mean(diff_y) + torch.mean(diff_x)
 
-            loss = F.mse_loss(img_conv, obs_image) + self.tv_weight * tv_loss
+            # Pixel-wise chi^2 weighted loss using exact noise_map (or uniform noise_std)
+            norm_res = (img_conv - obs_image) / self.sim.noise_map
+            loss = torch.mean(norm_res**2) + self.tv_weight * tv_loss
             loss.backward()
             optimizer.step()
 
@@ -116,7 +118,7 @@ class PINNOptimizer:
             F.grid_sample(final_src, grid_f, mode='bilinear', padding_mode='zeros', align_corners=True)
         ).detach()
         res_final = obs_image - pred_final
-        chi2_final = F.mse_loss(pred_final, obs_image).item() / (self.sim.noise_std**2)
+        chi2_final = torch.mean(((pred_final - obs_image) / self.sim.noise_map)**2).item()
 
         if verbose:
             print(f"[PINNOptimizer] Refinement complete in {elapsed:.2f} s.")
