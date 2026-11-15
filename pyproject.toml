@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sublens"
+version = "1.0.0"
+description = "Physics-Informed Astrometric Inversion and Subhalo Discovery Toolkit for Strong Gravitational Lensing"
+readme = "README.md"
+authors = [
+    { name = "Antigravity Gravitational Lensing Research Team" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.22.0",
+    "scipy>=1.8.0",
+    "astropy>=5.0.0",
+    "matplotlib>=3.5.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "lenstronomy>=1.11.0"
+]
+
+[tool.setuptools.packages.find]
+include = ["sublens*"]
