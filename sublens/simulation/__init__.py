@@ -5,6 +5,11 @@ from .benchmarks import (
     create_b1938_benchmark,
     create_scale_free_benchmark
 )
+from .hst import (
+    generate_hst_acs_psf,
+    generate_hst_noise_map,
+    create_j0946_hst_benchmark
+)
 
 __all__ = [
     "LensingSimulator",
@@ -13,5 +18,8 @@ __all__ = [
     "generate_complex_source",
     "create_j0946_benchmark",
     "create_b1938_benchmark",
-    "create_scale_free_benchmark"
+    "create_scale_free_benchmark",
+    "generate_hst_acs_psf",
+    "generate_hst_noise_map",
+    "create_j0946_hst_benchmark"
 ]
