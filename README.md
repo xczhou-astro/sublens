@@ -86,7 +86,36 @@ result.plot_subhalo_convergence(save_path="subhalo_kappa.png")
 result.save_fits("sdss_j0946_inversion_products.fits")
 ```
 
-### 3. One-Line Functional Interface (`detect_subhalo`)
+### 3. Generating Authentic Astronomical Benchmark FITS Datasets
+Generate standard telescope benchmark datasets (SDSS J0946+5106 & JVAS B1938+666) with authentic optical Fraunhofer diffraction PSFs and pixel-wise Poisson-Gaussian noise:
+
+```python
+import sublens as sl
+
+# Mode A: Synthesize a Single Multi-Extension FITS file (all modeling HDUs + Header Cards bundled)
+bench = sl.generate_benchmark_fits(
+    system="j0946",       # SDSS J0946+5106 (Vegetti et al. 2010 Nature)
+    mode="single",        # Bundles SCI, RMS, WHT, PSF in one container
+    output_dir="./data"
+)
+pipeline = sl.SubLensPipeline.from_fits(bench["fits_path"])
+result = pipeline.fit()   # Automatically reads macro model and redshifts from FITS headers!
+
+# Mode B: Synthesize Three Separate FITS files (Science Image, PSF Kernel, RMS Uncertainty)
+bench = sl.generate_benchmark_fits(
+    system="b1938",       # JVAS B1938+666 (Vegetti et al. 2012 Nature)
+    mode="separate",      # Writes <prefix>_sci.fits, <prefix>_psf.fits, <prefix>_rms.fits
+    output_dir="./data"
+)
+pipeline = sl.SubLensPipeline.from_fits(
+    bench["sci_path"],
+    psf_path=bench["psf_path"],
+    noise_path=bench["rms_path"]
+)
+result = pipeline.fit()
+```
+
+### 4. One-Line Functional Interface (`detect_subhalo`)
 ```python
 import sublens as sl
 
@@ -206,6 +235,7 @@ Euclid/
 │       └── visualization.py    # Publication diagnostic & component plotting
 │
 ├── examples/                   # Runnable end-to-end demonstration scripts
+│   ├── demo_generate_real_benchmarks.py # Authentic HST benchmark generation (single & separate)
 │   ├── demo_fits_and_component_controls.py # FITS I/O, component extraction & plotting
 │   ├── demo_with_redshift.py   # SDSS J0946+5106 Nature benchmark demo
 │   ├── demo_without_redshift.py# Scale-free / unknown redshift demo
@@ -216,7 +246,8 @@ Euclid/
     ├── test_profiles.py        # Profiles, deflections & autograd tests
     ├── test_inversion.py       # Forward simulator & metrics tests
     ├── test_api.py             # High-level pipeline API tests
-    └── test_fits_and_components.py # FITS loading, component extraction, FITS export tests
+    ├── test_fits_and_components.py # FITS loading, component extraction, FITS export tests
+    └── test_benchmark_fits_generators.py # Benchmark FITS synthesis (single & separate) tests
 ```
 
 ---
@@ -262,7 +293,17 @@ Outputs:
 - Evaluates the analytical mass degeneracy family $M_{\rm sub}(z_l, z_s)$.
 - Diagnostic plot saved to `demo_without_redshift_results.png`.
 
-### 3. FITS Data Ingestion, Component Extraction & Exporter
+### 3. Synthesize Authentic Benchmark FITS Datasets
+Generate standard telescope benchmark datasets (SDSS J0946+5106 & JVAS B1938+666) in single multi-extension or separate FITS formats:
+```bash
+python examples/demo_generate_real_benchmarks.py
+```
+Outputs:
+- Synthesizes `sdss_j0946_hst_f814w.fits` as a single multi-extension container (SCI, RMS, WHT, PSF, Header Cards).
+- Synthesizes `jvas_b1938_hst_f160w` as three separate FITS files (`_sci.fits`, `_psf.fits`, `_rms.fits`).
+- Automatically ingests each into `SubLensPipeline.from_fits()` and recovers ground truth subhalos.
+
+### 4. FITS Data Ingestion, Component Extraction & Exporter
 Demonstrate multi-extension FITS loading, 2D array extraction, individual component plotting, and FITS product generation:
 ```bash
 python examples/demo_fits_and_component_controls.py
@@ -274,7 +315,7 @@ Outputs:
 - Saves publication-ready individual component figures to `component_plots/`.
 - Exports all reconstructed 2D planes to standard multi-extension FITS `sdss_j0946_inversion_products.fits`.
 
-### 4. Direct Lenstronomy Benchmarking
+### 5. Direct Lenstronomy Benchmarking
 Compare SubLens against traditional SOTA sampling:
 ```bash
 python examples/demo_lenstronomy_benchmark.py

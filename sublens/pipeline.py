@@ -69,6 +69,28 @@ def _parse_fits_input(
             header_meta['Z_LENS'] = hdr.get('Z_LENS', None)
             header_meta['Z_SOURCE'] = hdr.get('Z_SOURCE', None)
 
+            # Auto-extract macro lens parameters if stored in header
+            if 'MACRO_TE' in hdr:
+                header_meta['macro_model'] = {
+                    'theta_E': float(hdr['MACRO_TE']),
+                    'q': float(hdr.get('MACRO_Q', 0.8)),
+                    'phi': float(hdr.get('MACRO_PA', 0.0)),
+                    'gamma': float(hdr.get('MACRO_G', 2.0)),
+                    'gamma_ext': float(hdr.get('SHEAR_G', 0.0)),
+                    'phi_ext': float(hdr.get('SHEAR_PA', 0.0))
+                }
+
+            # Auto-extract ground truth subhalo properties if stored in header
+            if 'SUB_X' in hdr and 'SUB_Y' in hdr:
+                header_meta['subhalo_true'] = {
+                    'sub_x_true': float(hdr['SUB_X']),
+                    'sub_y_true': float(hdr['SUB_Y']),
+                    'sub_true_pos': (float(hdr['SUB_X']), float(hdr['SUB_Y'])),
+                    'sub_mass_true': float(hdr.get('SUB_MASS', 0.0)),
+                    'sub_kappa_s': float(hdr.get('SUB_KS', 0.0)),
+                    'sub_theta_s': float(hdr.get('SUB_RS', 0.0))
+                }
+
             # Auto-detect bundled PSF from single multi-extension FITS if not explicitly given
             if psf_input is None and 'PSF' in ext_names:
                 psf_arr = hdul['PSF'].data.astype(np.float32)
@@ -170,9 +192,13 @@ class SubLensResult:
             "subhalo_y_arcsec": float(self.subhalo_pos[1]),
             "radar_candidate_arcsec": (float(self.radar_candidate_pos[0]), float(self.radar_candidate_pos[1])),
             "detection_significance_sigma": float(self.detection_significance),
+            "detection_significance_s": float(self.detection_significance),
             "chi2_reduced_initial": float(self.reduced_chi2_initial),
+            "chi2_red_initial": float(self.reduced_chi2_initial),
             "chi2_reduced_final": float(self.reduced_chi2_final),
+            "chi2_red_final": float(self.reduced_chi2_final),
             "delta_chi2_reduced": float(self.delta_chi2),
+            "delta_chi2": float(self.delta_chi2),
             "physical_mass_solar": self.physical_mass_solar,
             "theta_E_sub_arcsec": float(self.theta_E_sub),
             "relative_mass_ratio": self.relative_mass_ratio,
@@ -539,6 +565,11 @@ class SubLensPipeline:
             device=self.device
         )
 
+    @property
+    def pixel_scale(self) -> float:
+        """Instrument pixel scale in arcseconds per pixel."""
+        return self.simulator.pixel_scale
+
     @classmethod
     def from_fits(
         cls,
@@ -561,7 +592,7 @@ class SubLensPipeline:
         zs_val = z_s if z_s is not None else meta.get('Z_SOURCE')
         n_img = img_data.shape[0]
 
-        return cls(
+        instance = cls(
             z_l=zl_val,
             z_s=zs_val,
             pixel_scale=pix_scale,
@@ -571,11 +602,48 @@ class SubLensPipeline:
             device=device,
             **kwargs
         )
+        instance._cached_image = img_data
+        instance._fits_meta = meta
+        if 'macro_model' in meta:
+            instance.macro_model = meta['macro_model']
+        if 'subhalo_true' in meta:
+            instance.subhalo_true = meta['subhalo_true']
+        return instance
+
+    @classmethod
+    def generate_benchmark_fits(
+        cls,
+        system: str = "j0946",
+        mode: str = "single",
+        output_dir: str = ".",
+        prefix: Optional[str] = None,
+        kernel_size: int = 31,
+        device: str = "auto",
+        seed: int = 42,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Synthesizes authentic HST astronomical benchmark datasets for:
+        - 'j0946': SDSS J0946+5106 (Vegetti et al. 2010 Nature)
+        - 'b1938': JVAS B1938+666 (Vegetti et al. 2012 Nature)
+        Outputs single multi-extension FITS (mode='single') or 3 separate FITS (mode='separate').
+        """
+        from .simulation.hst import generate_benchmark_fits
+        return generate_benchmark_fits(
+            system=system,
+            mode=mode,
+            output_dir=output_dir,
+            prefix=prefix,
+            kernel_size=kernel_size,
+            device=device,
+            seed=seed,
+            **kwargs
+        )
 
     def fit(
         self,
-        image: Union[str, torch.Tensor, np.ndarray],
-        macro_model: Union[torch.Tensor, Dict[str, Any]],
+        image: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
+        macro_model: Optional[Union[torch.Tensor, Dict[str, Any]]] = None,
         psf_kernel: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
         noise_map: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
         subhalo_type: str = "NFW",
@@ -583,6 +651,7 @@ class SubLensPipeline:
         r_min: Optional[float] = None,
         r_max: Optional[float] = None,
         scan_range: Optional[float] = None,
+        test_subhalo_mass: Optional[float] = None,
         num_macro_steps: int = 120,
         num_pinn_steps: int = 120,
         ground_truth: Optional[Dict[str, Any]] = None,
@@ -596,8 +665,35 @@ class SubLensPipeline:
         """
         t0 = time.time()
 
+        # Check for cached image from from_fits if image not explicitly provided
+        if image is None:
+            if hasattr(self, '_cached_image') and self._cached_image is not None:
+                image = self._cached_image
+            else:
+                raise ValueError("Must provide image either to fit() or via from_fits().")
+
         # Parse FITS / Array inputs
         img_arr, psf_arr, noise_arr, meta = _parse_fits_input(image, psf_kernel, noise_map)
+        if hasattr(self, '_fits_meta') and self._fits_meta:
+            meta = {**self._fits_meta, **meta}
+
+        # Auto-extract macro_model if omitted
+        if macro_model is None:
+            if hasattr(self, 'macro_model') and self.macro_model is not None:
+                macro_model = self.macro_model
+            elif 'macro_model' in meta:
+                macro_model = meta['macro_model']
+            else:
+                raise ValueError(
+                    "macro_model must be provided either explicitly to fit() or via FITS header cards (MACRO_TE, etc.)."
+                )
+
+        # Auto-extract ground_truth if omitted
+        if ground_truth is None:
+            if hasattr(self, 'subhalo_true') and self.subhalo_true is not None:
+                ground_truth = self.subhalo_true
+            elif 'subhalo_true' in meta:
+                ground_truth = meta['subhalo_true']
 
         # Update simulator if custom PSF or Noise map arrived with fit()
         if psf_arr is not None or noise_arr is not None or img_arr.shape[0] != self.simulator.N_img:
@@ -643,7 +739,18 @@ class SubLensPipeline:
             host_theta_E = macro_model["theta_E"]
 
         if scan_range is None:
-            scan_range = min(1.55 * host_theta_E, 0.85 * self.simulator.L_img)
+            scan_range = min(max(1.35 * host_theta_E, host_theta_E + 0.45), 0.90 * self.simulator.L_img)
+
+        if r_min is None:
+            r_min = max(0.15, host_theta_E - 0.45)
+        if r_max is None:
+            r_max = host_theta_E + 0.50
+
+        if test_subhalo_mass is None:
+            if self.has_redshifts:
+                test_subhalo_mass = 3.5e9 * min(1.0, (host_theta_E / 1.43)**2)
+            else:
+                test_subhalo_mass = 0.035 * min(1.0, (host_theta_E / 1.43)**2)
 
         # Stage 1: Macro Baseline Fit
         if verbose:
@@ -655,7 +762,7 @@ class SubLensPipeline:
         if verbose:
             print(">>> [Pipeline Stage 2] Scanning Einstein ring manifold with Astrometric Radar...")
         radar = AstrometricRadar(self.simulator, grid_resolution=radar_resolution, r_min=r_min, r_max=r_max)
-        test_mass = 3.5e9 if self.has_redshifts else 0.035
+        test_mass = test_subhalo_mass
         radar_res = radar.scan(
             image_tensor,
             pred_macro=macro_res["pred_macro"],
@@ -763,7 +870,7 @@ class SubLensPipeline:
 
 def detect_subhalo(
     image: Union[str, torch.Tensor, np.ndarray],
-    macro_model: Union[torch.Tensor, Dict[str, Any]],
+    macro_model: Optional[Union[torch.Tensor, Dict[str, Any]]] = None,
     z_l: Optional[float] = None,
     z_s: Optional[float] = None,
     pixel_scale: Optional[float] = None,
@@ -780,14 +887,32 @@ def detect_subhalo(
     Convenience function for one-line subhalo detection.
     Supports single FITS file path, separate FITS files, or NumPy arrays.
     """
-    pipeline = SubLensPipeline(
-        z_l=z_l,
-        z_s=z_s,
-        pixel_scale=pixel_scale,
-        psf_fwhm=psf_fwhm,
-        noise_std=noise_std,
-        psf_kernel=psf_kernel,
-        noise_map=noise_map,
-        device=device
-    )
-    return pipeline.fit(image, macro_model, subhalo_type=subhalo_type, verbose=verbose, **kwargs)
+    if isinstance(image, str):
+        pipeline = SubLensPipeline.from_fits(
+            fits_path=image,
+            psf_path=psf_kernel if isinstance(psf_kernel, str) else None,
+            noise_path=noise_map if isinstance(noise_map, str) else None,
+            z_l=z_l,
+            z_s=z_s,
+            device=device,
+            **kwargs
+        )
+        return pipeline.fit(
+            image=None,
+            macro_model=macro_model,
+            subhalo_type=subhalo_type,
+            verbose=verbose,
+            **kwargs
+        )
+    else:
+        pipeline = SubLensPipeline(
+            z_l=z_l,
+            z_s=z_s,
+            pixel_scale=pixel_scale or 0.05,
+            psf_fwhm=psf_fwhm,
+            noise_std=noise_std,
+            psf_kernel=psf_kernel,
+            noise_map=noise_map,
+            device=device
+        )
+        return pipeline.fit(image, macro_model, subhalo_type=subhalo_type, verbose=verbose, **kwargs)

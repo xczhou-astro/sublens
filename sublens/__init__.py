@@ -32,9 +32,12 @@ from .simulation.benchmarks import (
     create_scale_free_benchmark
 )
 from .simulation.hst import (
+    generate_hst_psf,
     generate_hst_acs_psf,
     generate_hst_noise_map,
-    create_j0946_hst_benchmark
+    create_j0946_hst_benchmark,
+    create_b1938_hst_benchmark,
+    generate_benchmark_fits
 )
 
 # Algorithmic Inversion Stages
@@ -65,9 +68,12 @@ __all__ = [
     "create_j0946_benchmark",
     "create_b1938_benchmark",
     "create_scale_free_benchmark",
+    "generate_hst_psf",
     "generate_hst_acs_psf",
     "generate_hst_noise_map",
     "create_j0946_hst_benchmark",
+    "create_b1938_hst_benchmark",
+    "generate_benchmark_fits",
     "MacroFitter",
     "AstrometricRadar",
     "PINNOptimizer",

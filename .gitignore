@@ -45,6 +45,7 @@ env/
 *.fits
 *.ipynb
 component_plots/
+benchmark_fits_output/
 archive/
 
 # Loose experimental scripts (not part of the package)
