@@ -252,6 +252,7 @@ def plot_real_observation_figure(
     im8 = axes[1, 3].imshow(source_np, origin='lower', extent=src_extent, cmap='magma')
     axes[1, 3].set_title(r"(h) Reconstructed Background Source" + f"\n[High-z Source Galaxy Morphology]", fontsize=11, fontweight='bold')
     axes[1, 3].set_xlabel(r"$\beta_x\ (\mathrm{arcsec})$", fontsize=10)
+    axes[1, 3].set_ylabel(r"$\beta_y\ (\mathrm{arcsec})$", fontsize=10)
     fig.colorbar(im8, ax=axes[1, 3], fraction=0.046, pad=0.04, label=r"Surface Brightness")
 
     fig.suptitle(rf"Space Telescope Observation: Euclid Q1 Strong Lens Inversion ({lens_id})",

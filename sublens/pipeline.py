@@ -508,7 +508,7 @@ class SubLensResult:
                 "chi2_final": self.reduced_chi2_final,
                 "extent_img": self._sim.extent_img if hasattr(self._sim, 'extent_img') else [-5.0, 5.0, -5.0, 5.0],
                 "radar_extent": self._data.get("radar_extent", [-1.5, 1.5, -1.5, 1.5]),
-                "source_extent": [-self._sim.L_src / 2.0, self._sim.L_src / 2.0, -self._sim.L_src / 2.0, self._sim.L_src / 2.0] if hasattr(self._sim, 'L_src') else [-1.0, 1.0, -1.0, 1.0],
+                "source_extent": self._data.get("source_extent", [-self._sim.L_src / 2.0, self._sim.L_src / 2.0, -self._sim.L_src / 2.0, self._sim.L_src / 2.0] if hasattr(self._sim, 'L_src') else [-1.0, 1.0, -1.0, 1.0]),
                 "fit_mask": self._data.get("fit_mask"),
                 "lens_id": self._data.get("lens_id", "Euclid Q1 Lens"),
                 "theta_e": self._data.get("host_theta_E", 1.0)
@@ -743,6 +743,8 @@ class SubLensPipeline:
         num_macro_steps: int = 120,
         num_pinn_steps: int = 120,
         ground_truth: Optional[Dict[str, Any]] = None,
+        source_fov: Optional[Union[float, str]] = "auto",
+        source_resolution: Optional[int] = None,
         verbose: bool = True
     ) -> SubLensResult:
         """
@@ -798,6 +800,8 @@ class SubLensPipeline:
                 radar_resolution=radar_resolution,
                 num_macro_steps=num_macro_steps,
                 num_pinn_steps=num_pinn_steps,
+                source_fov=source_fov,
+                source_resolution=source_resolution,
                 verbose=verbose
             )
 

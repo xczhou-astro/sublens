@@ -324,7 +324,8 @@ def fit_real_lens_observation(
     radar_resolution: int = 45,
     num_macro_steps: int = 90,
     num_pinn_steps: int = 60,
-    source_fov: float = 2.0,
+    source_fov: Optional[Union[float, str]] = "auto",
+    source_resolution: Optional[int] = None,
     verbose: bool = True
 ) -> SubLensResult:
     """
@@ -427,8 +428,34 @@ def fit_real_lens_observation(
         by = (obs_y - final_te * ay_sie - ay_shear).detach()
         cx = sersic.x.detach()
         cy = sersic.y.detach()
+        r_eff = float(sersic.log_radius.exp().item())
 
-        axis_src = torch.linspace(-source_fov / 2.0, source_fov / 2.0, 64, device=device)
+        if source_fov is None or source_fov == "auto":
+            arc_flux = obs_img[mask_t]
+            f_thresh = max(float(noise_map[mask_t].median().item()) * 2.5, float(arc_flux.max().item()) * 0.15)
+            sig_mask = mask_t & (obs_img > f_thresh)
+            if sig_mask.sum() > 15:
+                dx_sig = (bx[sig_mask] - cx).abs()
+                dy_sig = (by[sig_mask] - cy).abs()
+                q_span = max(float(torch.quantile(dx_sig, 0.90).item()), float(torch.quantile(dy_sig, 0.90).item()))
+            else:
+                q_span = 0.30
+
+            ray_span = max(0.5, q_span * 2.2)
+            sersic_span = max(0.6, r_eff * 5.5)
+            effective_fov = min(1.6, max(0.65, max(ray_span, sersic_span)))
+        else:
+            effective_fov = float(source_fov)
+
+        if source_resolution is None:
+            source_res = int(round(effective_fov / 0.010))
+            source_res = max(64, min(96, source_res))
+            if source_res % 2 != 0:
+                source_res += 1
+        else:
+            source_res = int(source_resolution)
+
+        axis_src = torch.linspace(-effective_fov / 2.0, effective_fov / 2.0, source_res, device=device)
         sy, sx = torch.meshgrid(-axis_src + cy, axis_src + cx, indexing="ij")
         init_src = sersic(sx, sy).clamp_min(1e-4)
         raw_src = torch.nn.Parameter(init_src + torch.log(-torch.expm1(-init_src)))
@@ -437,16 +464,17 @@ def fit_real_lens_observation(
     for _ in range(num_macro_steps):
         opt_src.zero_grad()
         src_pix = torch.nn.functional.softplus(raw_src)
-        arc = _render_source(flux_unit * src_pix, bx, by, cx, cy, source_fov, psf_k)
+        arc = _render_source(flux_unit * src_pix, bx, by, cx, cy, effective_fov, psf_k)
         res = (obs_img - arc) / noise_map
         smoothness = src_pix.diff(dim=0).square().mean() + src_pix.diff(dim=1).square().mean()
-        loss = res[mask_t].square().mean() + 0.15 * smoothness
+        reg_weight = 0.05 * (64.0 / float(source_res))
+        loss = res[mask_t].square().mean() + reg_weight * smoothness
         loss.backward()
         opt_src.step()
 
     with torch.no_grad():
         final_src = (flux_unit * torch.nn.functional.softplus(raw_src)).detach()
-        I_base = _render_source(final_src, bx, by, cx, cy, source_fov, psf_k).detach()
+        I_base = _render_source(final_src, bx, by, cx, cy, effective_fov, psf_k).detach()
         res_macro = (obs_img - I_base).detach()
         norm_res_macro = (res_macro / noise_map).detach()
         chi2_base = norm_res_macro[mask_t].square().mean().item()
@@ -469,7 +497,7 @@ def fit_real_lens_observation(
                 dax, day = _halo_deflection(obs_x, obs_y, tx.item(), ty.item(), strength=torch.tensor(0.015, device=device))
                 bx_pert = bx - dax
                 by_pert = by - day
-                I_pert = _render_source(final_src, bx_pert, by_pert, cx, cy, source_fov, psf_k)
+                I_pert = _render_source(final_src, bx_pert, by_pert, cx, cy, effective_fov, psf_k)
 
                 d_I = (I_pert - I_base) / noise_map
                 d_I_masked = torch.where(mask_t, d_I, torch.zeros_like(d_I))
@@ -505,7 +533,7 @@ def fit_real_lens_observation(
         dax, day = _halo_deflection(obs_x, obs_y, halo_pos[0], halo_pos[1], strength=str_val)
         bx_pert = bx - dax
         by_pert = by - day
-        I_pert = _render_source(final_src, bx_pert, by_pert, cx, cy, source_fov, psf_k)
+        I_pert = _render_source(final_src, bx_pert, by_pert, cx, cy, effective_fov, psf_k)
         loss = ((obs_img - I_pert) / noise_map)[mask_t].square().mean()
         loss.backward()
         opt_pinn.step()
@@ -514,7 +542,7 @@ def fit_real_lens_observation(
         final_pos = (float(halo_pos[0].cpu().item()), float(halo_pos[1].cpu().item()))
         final_str = float(log_strength.exp().cpu().item())
         dax_f, day_f = _halo_deflection(obs_x, obs_y, halo_pos[0], halo_pos[1], strength=log_strength.exp())
-        I_final = _render_source(final_src, bx - dax_f, by - day_f, cx, cy, source_fov, psf_k).detach()
+        I_final = _render_source(final_src, bx - dax_f, by - day_f, cx, cy, effective_fov, psf_k).detach()
         res_final = (obs_img - I_final).detach()
         chi2_final = ((res_final / noise_map)[mask_t].square().mean()).cpu().item()
         delta_chi2_total = (chi2_base - chi2_final) * mask_t.sum().item()
@@ -525,6 +553,20 @@ def fit_real_lens_observation(
     if verbose:
         status_str = "CONFIRMED SUBHALO DETECTION" if detection_flag else "NO SUBHALO (SMOOTH LENS / UPPER LIMIT)"
         print(f"  >>> Inversion Complete in {elapsed:.2f}s | chi2: {chi2_base:.3f} -> {chi2_final:.3f} (Delta chi2 = {delta_chi2_total:.2f}) | {status_str}")
+
+    cx_val = float(cx.cpu().item())
+    cy_val = float(cy.cpu().item())
+    src_extent = [
+        cx_val - effective_fov / 2.0,
+        cx_val + effective_fov / 2.0,
+        cy_val - effective_fov / 2.0,
+        cy_val + effective_fov / 2.0
+    ]
+
+    # Synchronize pipeline simulator geometry if present
+    if hasattr(pipeline, "simulator") and pipeline.simulator is not None:
+        pipeline.simulator.L_src = effective_fov
+        pipeline.simulator.N_src = source_res
 
     # Build SubLensResult container
     data = {
@@ -549,6 +591,10 @@ def fit_real_lens_observation(
         "simulator": pipeline.simulator,
         "is_real_observation": True,
         "fit_mask": mask_t,
+        "source_extent": src_extent,
+        "source_fov": effective_fov,
+        "source_resolution": source_res,
+        "source_center": (cx_val, cy_val),
         "lens_id": meta.get("OBJECT", "Euclid Q1 Lens"),
         "object_id": meta.get("OBJECT", "Euclid Q1 Lens"),
         "ra": meta.get("RA"),
