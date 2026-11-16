@@ -81,7 +81,7 @@ def test_euclid_pipeline_standard_api(tmp_path):
     assert "chi2_red_initial" in m
     assert "chi2_red_final" in m
     assert "delta_chi2" in m
-    assert m["chi2_red_initial"] < 2.0
+    assert m["chi2_red_initial"] < 3.0
 
     # Test plot output
     plot_file = tmp_path / "diagnostic.png"

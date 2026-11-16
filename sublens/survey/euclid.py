@@ -468,23 +468,45 @@ def fit_real_lens_observation(
 
         axis_src = torch.linspace(-effective_fov / 2.0, effective_fov / 2.0, source_res, device=device)
         sy, sx = torch.meshgrid(-axis_src + cy, axis_src + cx, indexing="ij")
-        init_src = sersic(sx, sy).clamp_min(1e-4)
-        raw_src = torch.nn.Parameter(init_src + torch.log(-torch.expm1(-init_src)))
+        init_src = sersic(sx, sy).detach().clamp_min(1e-4)
 
-    opt_src = torch.optim.Adam([raw_src], lr=0.08)
+        # Spatial coherence: Gaussian filter kernel enforcing smooth galaxy morphology
+        sigma_pix = 2.0
+        ksize = int(2 * round(3 * sigma_pix) + 1)
+        kx = torch.arange(ksize, dtype=torch.float32, device=device) - ksize // 2
+        g1d = torch.exp(-0.5 * (kx / sigma_pix)**2)
+        g2d = (g1d[:, None] * g1d[None, :])
+        g2d = (g2d / g2d.sum())[None, None]
+
+        raw_src = torch.nn.Parameter(torch.log(torch.exp(init_src) - 1.0 + 1e-6))
+
+    opt_src = torch.optim.Adam([raw_src], lr=0.04)
+    r_border = torch.sqrt((sx - cx)**2 + (sy - cy)**2) / (effective_fov / 2.0)
+    border_mask = (r_border > 0.85).float()
+
     for _ in range(num_macro_steps):
         opt_src.zero_grad()
-        src_pix = torch.nn.functional.softplus(raw_src)
+        blurred = torch.nn.functional.conv2d(raw_src[None, None], g2d, padding=ksize//2)[0, 0]
+        src_pix = torch.nn.functional.softplus(blurred)
         arc = _render_source(flux_unit * src_pix, bx, by, cx, cy, effective_fov, psf_k)
         res = (obs_img - arc) / noise_map
-        smoothness = src_pix.diff(dim=0).square().mean() + src_pix.diff(dim=1).square().mean()
-        reg_weight = 0.05 * (64.0 / float(source_res))
-        loss = res[mask_t].square().mean() + reg_weight * smoothness
+        data_loss = res[mask_t].square().mean()
+
+        # Edge damping: penalize unconstrained flux drifting at the grid boundary
+        border_penalty = (src_pix * border_mask).square().mean() * 5.0
+
+        # Curvature regularization: penalize second spatial derivatives
+        d2x = src_pix[:, 2:] - 2 * src_pix[:, 1:-1] + src_pix[:, :-2]
+        d2y = src_pix[2:, :] - 2 * src_pix[1:-1, :] + src_pix[:-2, :]
+        curv_loss = (d2x.square().mean() + d2y.square().mean()) * 0.5
+
+        loss = data_loss + border_penalty + curv_loss
         loss.backward()
         opt_src.step()
 
     with torch.no_grad():
-        final_src = (flux_unit * torch.nn.functional.softplus(raw_src)).detach()
+        blurred = torch.nn.functional.conv2d(raw_src[None, None], g2d, padding=ksize//2)[0, 0]
+        final_src = (flux_unit * torch.nn.functional.softplus(blurred)).detach()
         I_base = _render_source(final_src, bx, by, cx, cy, effective_fov, psf_k).detach()
         res_macro = (obs_img - I_base).detach()
         norm_res_macro = (res_macro / noise_map).detach()
