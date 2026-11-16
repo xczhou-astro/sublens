@@ -44,6 +44,7 @@ from .simulation.hst import (
 from .inversion.macro_fitter import MacroFitter
 from .inversion.radar import AstrometricRadar
 from .inversion.pinn_optimizer import PINNOptimizer
+from .inversion.voronoi import VoronoiSourceInverter
 
 # Benchmarks & Utilities
 from .benchmarks.lenstronomy_bench import LenstronomyBenchmark
@@ -77,6 +78,7 @@ __all__ = [
     "MacroFitter",
     "AstrometricRadar",
     "PINNOptimizer",
+    "VoronoiSourceInverter",
     "LenstronomyBenchmark",
     "compute_astrometric_error",
     "compute_image_metrics",
