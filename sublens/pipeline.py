@@ -68,6 +68,8 @@ def _parse_fits_input(
             header_meta['TELESCOP'] = hdr.get('TELESCOP', None)
             header_meta['Z_LENS'] = hdr.get('Z_LENS', None)
             header_meta['Z_SOURCE'] = hdr.get('Z_SOURCE', None)
+            header_meta['L_SRC'] = float(hdr['L_SRC']) if 'L_SRC' in hdr else None
+            header_meta['N_SRC'] = int(hdr['N_SRC']) if 'N_SRC' in hdr else None
 
             # Auto-extract macro lens parameters if stored in header
             if 'MACRO_TE' in hdr:
@@ -535,14 +537,22 @@ class SubLensPipeline:
         self.has_redshifts = (z_l is not None and z_s is not None)
         self.cosmology = LensingCosmology(z_l=z_l, z_s=z_s)
 
-        # Parse potential FITS paths in psf_kernel or noise_map
+        # Parse potential FITS paths, numpy arrays, or tensors in psf_kernel or noise_map
         parsed_psf = None
         if psf_kernel is not None:
-            _, parsed_psf, _, _ = _parse_fits_input(psf_kernel)
+            if isinstance(psf_kernel, (np.ndarray, torch.Tensor)):
+                parsed_psf = psf_kernel.squeeze().cpu().numpy() if isinstance(psf_kernel, torch.Tensor) else psf_kernel.squeeze()
+            elif isinstance(psf_kernel, str):
+                p_img, p_psf, _, _ = _parse_fits_input(psf_kernel)
+                parsed_psf = p_psf if p_psf is not None else p_img
 
         parsed_noise = None
         if noise_map is not None:
-            _, _, parsed_noise, _ = _parse_fits_input(noise_map)
+            if isinstance(noise_map, (np.ndarray, torch.Tensor)):
+                parsed_noise = noise_map.squeeze().cpu().numpy() if isinstance(noise_map, torch.Tensor) else noise_map.squeeze()
+            elif isinstance(noise_map, str):
+                n_img, _, n_noise, _ = _parse_fits_input(noise_map)
+                parsed_noise = n_noise if n_noise is not None else n_img
 
         self.default_pixel_scale = pixel_scale or 0.05
         self.psf_fwhm = psf_fwhm
@@ -590,7 +600,18 @@ class SubLensPipeline:
         pix_scale = meta.get('PIXSCALE') or kwargs.get('pixel_scale', 0.05)
         zl_val = z_l if z_l is not None else meta.get('Z_LENS')
         zs_val = z_s if z_s is not None else meta.get('Z_SOURCE')
+        l_src_val = meta.get('L_SRC') or kwargs.get('L_src')
+        if l_src_val is None:
+            macro_info = meta.get('macro_model', {})
+            te = macro_info.get('theta_E', 1.40)
+            l_src_val = min(1.8, max(0.6, 1.35 * te))
+        n_src_val = meta.get('N_SRC') or kwargs.get('N_src', 64)
         n_img = img_data.shape[0]
+
+        kwargs_clean = kwargs.copy()
+        kwargs_clean.pop('pixel_scale', None)
+        kwargs_clean.pop('N_src', None)
+        kwargs_clean.pop('L_src', None)
 
         instance = cls(
             z_l=zl_val,
@@ -599,8 +620,10 @@ class SubLensPipeline:
             psf_kernel=psf_data,
             noise_map=noise_data,
             N_img=n_img,
+            N_src=n_src_val,
+            L_src=l_src_val,
             device=device,
-            **kwargs
+            **kwargs_clean
         )
         instance._cached_image = img_data
         instance._fits_meta = meta
@@ -738,13 +761,29 @@ class SubLensPipeline:
         if isinstance(macro_model, dict) and "theta_E" in macro_model:
             host_theta_E = macro_model["theta_E"]
 
+        # Auto-adapt source plane extent to compact lenses if not customized
+        if self.simulator.L_src > 1.30 and host_theta_E < 0.8:
+            adapted_l_src = min(1.8, max(0.6, 1.35 * host_theta_E))
+            self.L_src = adapted_l_src
+            self.simulator = LensingSimulator(
+                N_img=self.simulator.N_img,
+                pixel_scale=self.simulator.pixel_scale,
+                N_src=self.simulator.N_src,
+                L_src=adapted_l_src,
+                psf_fwhm=self.psf_fwhm,
+                noise_std=self.noise_std,
+                psf_kernel=self.simulator.psf_kernel,
+                noise_map=self.simulator.noise_map,
+                device=self.device
+            )
+
         if scan_range is None:
-            scan_range = min(max(1.35 * host_theta_E, host_theta_E + 0.45), 0.90 * self.simulator.L_img)
+            scan_range = min(max(1.35 * host_theta_E, host_theta_E + 0.35), 0.90 * self.simulator.L_img)
 
         if r_min is None:
-            r_min = max(0.15, host_theta_E - 0.45)
+            r_min = max(0.20, host_theta_E - 0.25) if host_theta_E < 0.8 else max(0.40, host_theta_E - 0.50)
         if r_max is None:
-            r_max = host_theta_E + 0.50
+            r_max = host_theta_E + 0.35 if host_theta_E < 0.8 else host_theta_E + 0.55
 
         if test_subhalo_mass is None:
             if self.has_redshifts:

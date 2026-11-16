@@ -31,7 +31,7 @@ def nfw_subhalo_deflection(
     x_safe = torch.where(torch.abs(x - 1.0) < eps, torch.tensor(1.0 + eps, device=coords.device), x)
     cond = x_safe < 1.0
 
-    u_small = torch.sqrt(torch.clamp(1.0 - x_safe**2, min=1e-10))
+    u_small = torch.sqrt(torch.clamp(1.0 - x_safe**2, min=1e-10, max=1.0 - 1e-6))
     f_small = torch.atanh(u_small) / u_small
     u_large = torch.sqrt(torch.clamp(x_safe**2 - 1.0, min=1e-10))
     f_large = torch.atan(u_large) / u_large

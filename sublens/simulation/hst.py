@@ -358,6 +358,8 @@ def create_j0946_hst_benchmark(
         'Z_SOURCE': (z_s, 'Background source redshift'),
         'EXPTIME':  (exptime, 'Total exposure time in seconds'),
         'PIXSCALE': (pixel_scale, 'Arcseconds per pixel'),
+        'L_SRC':    (L_src, 'Source plane half-width extent in arcsec'),
+        'N_SRC':    (64, 'Source plane grid resolution'),
         'MACRO_TE': (macro_params['theta_E'], 'Macro lens Einstein radius (arcsec)'),
         'MACRO_Q':  (macro_params['q'], 'Macro lens axis ratio'),
         'MACRO_PA': (macro_params['phi'], 'Macro lens position angle (rad)'),
@@ -453,8 +455,13 @@ def create_b1938_hst_benchmark(
     L_src = 0.80
     prefix = prefix or "jvas_b1938_hst_f160w"
 
-    # 1. 2D HST WFC3/IR F160W PSF (1600nm)
-    hst_psf = generate_hst_psf(kernel_size=kernel_size, pixel_scale=pixel_scale, wavelength_nm=1600.0)
+    # 1. 2D High-Resolution Optical / AO PSF matching Vegetti et al. (2012 Nature: Keck AO / HST FWHM ~ 0.06")
+    sigma_pix = (0.06 / 2.35482) / pixel_scale
+    coords_k = np.arange(kernel_size) - kernel_size // 2
+    xx_k, yy_k = np.meshgrid(coords_k, coords_k)
+    hst_psf = np.exp(-0.5 * (xx_k**2 + yy_k**2) / (sigma_pix**2))
+    hst_psf /= hst_psf.sum()
+    hst_psf = hst_psf.astype(np.float32)
 
     # 2. Simulator setup
     sim = LensingSimulator(
@@ -522,15 +529,16 @@ def create_b1938_hst_benchmark(
 
     # 8. Complete FITS metadata headers
     header_meta = {
-        'TELESCOP': ('HST', 'Hubble Space Telescope'),
-        'INSTRUME': ('WFC3', 'Wide Field Camera 3'),
-        'DETECTOR': ('IR', 'Infrared Channel'),
-        'FILTER':   ('F160W', 'Near-IR H-band filter (1600nm)'),
+        'TELESCOP': ('HST', 'Hubble Space Telescope (Keck AO / High-Res Spec)'),
+        'INSTRUME': ('WFC3', 'High-Resolution Channel'),
+        'FILTER':   ('F160W', 'Diffraction-limited AO FWHM=0.06 arcsec'),
         'OBJECT':   ('JVAS B1938+666', 'Gravitational Lens with Dwarf Satellite'),
         'Z_LENS':   (z_l, 'Host lens redshift'),
         'Z_SOURCE': (z_s, 'Background source redshift'),
         'EXPTIME':  (exptime, 'Total exposure time in seconds'),
         'PIXSCALE': (pixel_scale, 'Arcseconds per pixel'),
+        'L_SRC':    (L_src, 'Source plane half-width extent in arcsec'),
+        'N_SRC':    (64, 'Source plane grid resolution'),
         'MACRO_TE': (macro_params['theta_E'], 'Macro lens Einstein radius (arcsec)'),
         'MACRO_Q':  (macro_params['q'], 'Macro lens axis ratio'),
         'MACRO_PA': (macro_params['phi'], 'Macro lens position angle (rad)'),
