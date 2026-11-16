@@ -326,6 +326,7 @@ def fit_real_lens_observation(
     num_pinn_steps: int = 60,
     source_fov: Optional[Union[float, str]] = "auto",
     source_resolution: Optional[int] = None,
+    fix_macro: bool = True,
     verbose: bool = True
 ) -> SubLensResult:
     """
@@ -386,8 +387,8 @@ def fit_real_lens_observation(
     x_rel = obs_x - mcx
     y_rel = obs_y - mcy
     ax_sie, ay_sie = _elliptical_sie(x_rel, y_rel, q, cos_phi, sin_phi, f)
-    ax_shear = shear_1 * obs_x + shear_2 * obs_y
-    ay_shear = shear_2 * obs_x - shear_1 * obs_y
+    ax_shear = shear_1 * x_rel + shear_2 * y_rel
+    ay_shear = shear_2 * x_rel - shear_1 * y_rel
 
     beta_x_init = obs_x - theta_e_val * ax_sie - ax_shear
     beta_y_init = obs_y - theta_e_val * ay_sie - ay_shear
@@ -405,27 +406,37 @@ def fit_real_lens_observation(
     cy_init = (beta_y_init[mask_t] * weights).sum() / w_sum
 
     sersic = SersicSource(flux_unit.new_tensor(2.0), cx_init, cy_init)
-    log_theta_scale = torch.nn.Parameter(torch.zeros((), device=device))
-    opt_sersic = torch.optim.Adam([
-        {"params": sersic.parameters(), "lr": 0.025},
-        {"params": [log_theta_scale], "lr": 0.004}
-    ])
-
-    for _ in range(60):
-        opt_sersic.zero_grad()
-        cur_te = theta_e_val * log_theta_scale.exp()
-        bx = obs_x - cur_te * ax_sie - ax_shear
-        by = obs_y - cur_te * ay_sie - ay_shear
-        arc = torch.nn.functional.conv2d((flux_unit * sersic(bx, by))[None, None], psf_k, padding="same")[0, 0]
-        res = (obs_img - arc) / noise_map
-        loss = res[mask_t].square().mean() + 10.0 * log_theta_scale.square()
-        loss.backward()
-        opt_sersic.step()
-
-    with torch.no_grad():
+    if fix_macro:
+        opt_sersic = torch.optim.Adam(sersic.parameters(), lr=0.025)
+        for _ in range(60):
+            opt_sersic.zero_grad()
+            arc = torch.nn.functional.conv2d((flux_unit * sersic(beta_x_init, beta_y_init))[None, None], psf_k, padding="same")[0, 0]
+            loss = ((obs_img - arc) / noise_map)[mask_t].square().mean()
+            loss.backward()
+            opt_sersic.step()
+        final_te = torch.tensor(theta_e_val, device=device)
+        bx = beta_x_init
+        by = beta_y_init
+    else:
+        log_theta_scale = torch.nn.Parameter(torch.zeros((), device=device))
+        opt_sersic = torch.optim.Adam([
+            {"params": sersic.parameters(), "lr": 0.025},
+            {"params": [log_theta_scale], "lr": 0.004}
+        ])
+        for _ in range(60):
+            opt_sersic.zero_grad()
+            cur_te = theta_e_val * log_theta_scale.exp()
+            b_x = obs_x - cur_te * ax_sie - ax_shear
+            b_y = obs_y - cur_te * ay_sie - ay_shear
+            arc = torch.nn.functional.conv2d((flux_unit * sersic(b_x, b_y))[None, None], psf_k, padding="same")[0, 0]
+            loss = ((obs_img - arc) / noise_map)[mask_t].square().mean() + 10.0 * log_theta_scale.square()
+            loss.backward()
+            opt_sersic.step()
         final_te = (theta_e_val * log_theta_scale.exp()).detach()
         bx = (obs_x - final_te * ax_sie - ax_shear).detach()
         by = (obs_y - final_te * ay_sie - ay_shear).detach()
+
+    with torch.no_grad():
         cx = sersic.x.detach()
         cy = sersic.y.detach()
         r_eff = float(sersic.log_radius.exp().item())

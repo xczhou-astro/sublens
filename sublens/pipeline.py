@@ -745,6 +745,7 @@ class SubLensPipeline:
         ground_truth: Optional[Dict[str, Any]] = None,
         source_fov: Optional[Union[float, str]] = "auto",
         source_resolution: Optional[int] = None,
+        fix_macro: bool = True,
         verbose: bool = True
     ) -> SubLensResult:
         """
@@ -802,6 +803,7 @@ class SubLensPipeline:
                 num_pinn_steps=num_pinn_steps,
                 source_fov=source_fov,
                 source_resolution=source_resolution,
+                fix_macro=fix_macro,
                 verbose=verbose
             )
 
