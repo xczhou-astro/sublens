@@ -46,6 +46,12 @@ env/
 *.ipynb
 component_plots/
 benchmark_fits_output/
+euclid_q1_fits/
+euclid_q1_diagnostic_plots/
+data_b1938/
+data_j0946/
+test_b1938_diag/
+*.csv
 archive/
 
 # Loose experimental scripts (not part of the package)

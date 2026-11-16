@@ -25,7 +25,7 @@ from .inversion.macro_fitter import MacroFitter
 from .inversion.radar import AstrometricRadar
 from .inversion.pinn_optimizer import PINNOptimizer
 from .utils.metrics import compute_astrometric_error, compute_image_metrics
-from .utils.visualization import plot_diagnostic_figure
+from .utils.visualization import plot_diagnostic_figure, plot_real_observation_figure
 
 
 def _parse_fits_input(
@@ -60,6 +60,11 @@ def _parse_fits_input(
                 hdr = hdul[0].header
 
             # Extract header metadata
+            header_meta['OBJECT'] = hdr.get('OBJECT', None)
+            header_meta['RA'] = float(hdr['RA']) if 'RA' in hdr else None
+            header_meta['DEC'] = float(hdr['DEC']) if 'DEC' in hdr else None
+            header_meta['GRADE'] = hdr.get('GRADE', None)
+            header_meta['EXPSCORE'] = float(hdr['EXPSCORE']) if 'EXPSCORE' in hdr else None
             header_meta['PIXSCALE'] = hdr.get('PIXSCALE', hdr.get('CD1_1', hdr.get('CDELT1', None)))
             if header_meta['PIXSCALE'] is not None:
                 header_meta['PIXSCALE'] = abs(float(header_meta['PIXSCALE']))
@@ -75,11 +80,16 @@ def _parse_fits_input(
             if 'MACRO_TE' in hdr:
                 header_meta['macro_model'] = {
                     'theta_E': float(hdr['MACRO_TE']),
+                    'center': (float(hdr.get('MACRO_XC', 0.0)), float(hdr.get('MACRO_YC', 0.0))),
                     'q': float(hdr.get('MACRO_Q', 0.8)),
                     'phi': float(hdr.get('MACRO_PA', 0.0)),
                     'gamma': float(hdr.get('MACRO_G', 2.0)),
                     'gamma_ext': float(hdr.get('SHEAR_G', 0.0)),
-                    'phi_ext': float(hdr.get('SHEAR_PA', 0.0))
+                    'phi_ext': float(hdr.get('SHEAR_PA', 0.0)),
+                    'shear_1': float(hdr.get('SHEAR_1', 0.0)),
+                    'shear_2': float(hdr.get('SHEAR_2', 0.0)),
+                    'ell_x': float(hdr.get('ELL_X', 0.0)),
+                    'ell_y': float(hdr.get('ELL_Y', 0.0))
                 }
 
             # Auto-extract ground truth subhalo properties if stored in header
@@ -92,6 +102,10 @@ def _parse_fits_input(
                     'sub_kappa_s': float(hdr.get('SUB_KS', 0.0)),
                     'sub_theta_s': float(hdr.get('SUB_RS', 0.0))
                 }
+
+            # Auto-detect bundled Mask from single multi-extension FITS if present
+            if 'MASK' in ext_names:
+                header_meta['fit_mask'] = hdul['MASK'].data.astype(bool)
 
             # Auto-detect bundled PSF from single multi-extension FITS if not explicitly given
             if psf_input is None and 'PSF' in ext_names:
@@ -200,7 +214,7 @@ class SubLensResult:
             "chi2_reduced_final": float(self.reduced_chi2_final),
             "chi2_red_final": float(self.reduced_chi2_final),
             "delta_chi2_reduced": float(self.delta_chi2),
-            "delta_chi2": float(self.delta_chi2),
+            "delta_chi2": float(self._data.get("delta_chi2_total", self.delta_chi2)),
             "physical_mass_solar": self.physical_mass_solar,
             "theta_E_sub_arcsec": float(self.theta_E_sub),
             "relative_mass_ratio": self.relative_mass_ratio,
@@ -210,7 +224,14 @@ class SubLensResult:
             "elapsed_seconds": float(self.elapsed_time),
             "has_redshifts": self.has_redshifts,
             "z_lens": self.z_l,
-            "z_source": self.z_s
+            "z_source": self.z_s,
+            "object_id": self._data.get("object_id", self._data.get("lens_id", "Unknown")),
+            "lens_id": self._data.get("lens_id", self._data.get("object_id", "Unknown")),
+            "ra": self._data.get("ra"),
+            "dec": self._data.get("dec"),
+            "expert_score": self._data.get("expert_score"),
+            "grade": self._data.get("grade", "A"),
+            "detection_flag": bool(self._data.get("detection_flag", False))
         }
 
     # ----------------------------------------------------------------------------------
@@ -469,6 +490,33 @@ class SubLensResult:
         if component is not None:
             return self.plot_component(component, save_path=save_path, dpi=dpi)
 
+        if self._data.get("is_real_observation", False):
+            plot_dict = {
+                "obs_image": self._obs_image,
+                "noise_map": self._data.get("noise_map", self._sim.noise_map if hasattr(self._sim, 'noise_map') else None),
+                "pred_macro": self._data.get("pred_macro", self._modeled_image),
+                "pred_final": self._modeled_image,
+                "res_macro": self._macro_residual,
+                "res_final": self._residual_image,
+                "source_final": self._reconstructed_source,
+                "radar_scores": self._radar_score_map,
+                "radar_coords": self._data.get("radar_coords"),
+                "radar_pos": self.radar_candidate_pos,
+                "pinn_pos": self.subhalo_pos,
+                "radar_score": self.detection_significance,
+                "chi2_macro": self.reduced_chi2_initial,
+                "chi2_final": self.reduced_chi2_final,
+                "extent_img": self._sim.extent_img if hasattr(self._sim, 'extent_img') else [-5.0, 5.0, -5.0, 5.0],
+                "radar_extent": self._data.get("radar_extent", [-1.5, 1.5, -1.5, 1.5]),
+                "source_extent": [-self._sim.L_src / 2.0, self._sim.L_src / 2.0, -self._sim.L_src / 2.0, self._sim.L_src / 2.0] if hasattr(self._sim, 'L_src') else [-1.0, 1.0, -1.0, 1.0],
+                "fit_mask": self._data.get("fit_mask"),
+                "lens_id": self._data.get("lens_id", "Euclid Q1 Lens"),
+                "theta_e": self._data.get("host_theta_E", 1.0)
+            }
+            plot_real_observation_figure(plot_dict, save_path=save_path, dpi=dpi)
+            print(f">>> 8-panel real observation diagnostic overview saved to: {save_path}")
+            return
+
         plot_dict = {
             "simulator": self._sim,
             "obs_image": self._obs_image,
@@ -627,11 +675,27 @@ class SubLensPipeline:
         )
         instance._cached_image = img_data
         instance._fits_meta = meta
+        if 'fit_mask' in meta:
+            instance.fit_mask = meta['fit_mask']
         if 'macro_model' in meta:
             instance.macro_model = meta['macro_model']
         if 'subhalo_true' in meta:
             instance.subhalo_true = meta['subhalo_true']
         return instance
+
+    @classmethod
+    def prepare_euclid_fits(
+        cls,
+        lens_id: str,
+        data_dir: str = "archive/data",
+        output_path: Optional[str] = None,
+        crop_size: int = 100,
+        **kwargs
+    ) -> str:
+        """Standard FITS ingestion for Euclid Q1 Early Release Observations."""
+        from .survey.euclid import prepare_euclid_grade_a_fits
+        return prepare_euclid_grade_a_fits(lens_id, data_dir=data_dir, output_path=output_path, crop_size=crop_size, **kwargs)
+
 
     @classmethod
     def generate_benchmark_fits(
@@ -669,6 +733,7 @@ class SubLensPipeline:
         macro_model: Optional[Union[torch.Tensor, Dict[str, Any]]] = None,
         psf_kernel: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
         noise_map: Optional[Union[str, torch.Tensor, np.ndarray]] = None,
+        fit_mask: Optional[Union[np.ndarray, torch.Tensor]] = None,
         subhalo_type: str = "NFW",
         radar_resolution: int = 45,
         r_min: Optional[float] = None,
@@ -710,6 +775,31 @@ class SubLensPipeline:
                 raise ValueError(
                     "macro_model must be provided either explicitly to fit() or via FITS header cards (MACRO_TE, etc.)."
                 )
+
+        # Check for fit_mask (for real masked survey observations)
+        active_mask = None
+        if fit_mask is not None:
+            active_mask = fit_mask
+        elif hasattr(self, 'fit_mask') and self.fit_mask is not None:
+            active_mask = self.fit_mask
+        elif 'fit_mask' in meta:
+            active_mask = meta['fit_mask']
+
+        if active_mask is not None:
+            from .survey.euclid import fit_real_lens_observation
+            return fit_real_lens_observation(
+                pipeline=self,
+                image_arr=img_arr,
+                psf_arr=psf_arr if psf_arr is not None else self.simulator.psf_kernel,
+                noise_arr=noise_arr if noise_arr is not None else self.simulator.noise_map,
+                fit_mask=active_mask,
+                macro_model=macro_model,
+                meta=meta,
+                radar_resolution=radar_resolution,
+                num_macro_steps=num_macro_steps,
+                num_pinn_steps=num_pinn_steps,
+                verbose=verbose
+            )
 
         # Auto-extract ground_truth if omitted
         if ground_truth is None:

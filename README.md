@@ -115,7 +115,33 @@ pipeline = sl.SubLensPipeline.from_fits(
 result = pipeline.fit()
 ```
 
-### 4. One-Line Functional Interface (`detect_subhalo`)
+### 4. Euclid Space Telescope Survey Mode (Q1 Grade A Confirmed Lenses)
+Standard API ingestion and automated survey batch processing across real space telescope observations:
+
+```python
+from sublens import SubLensPipeline
+from sublens.survey.euclid import prepare_euclid_grade_a_fits, run_euclid_grade_a_survey
+
+# Option A: Ingest and analyze an individual Euclid Grade A lens
+fits_file = prepare_euclid_grade_a_fits("102158584_2687900321650859511")
+pipeline = SubLensPipeline.from_fits(fits_file)
+result = pipeline.fit()
+
+# Export publication-quality 8-panel diagnostic figure
+result.plot(save_path="euclid_diagnostic.png")
+# Export DS9 / Aladin multi-extension FITS data products
+result.save_fits("euclid_inversion_products.fits")
+
+# Option B: Batch survey processing across Grade A sample
+catalog_table, results = run_euclid_grade_a_survey(
+    max_systems=10,
+    output_dir="euclid_q1_diagnostic_plots",
+    table_output_csv="euclid_q1_grade_a_catalog.csv",
+    table_output_fits="euclid_q1_grade_a_catalog.fits"
+)
+```
+
+### 5. One-Line Functional Interface (`detect_subhalo`)
 ```python
 import sublens as sl
 
