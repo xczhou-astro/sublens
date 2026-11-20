@@ -27,6 +27,7 @@ from astropy.io import fits
 from astropy.table import Table
 
 from ..pipeline import SubLensPipeline, SubLensResult
+from ..profiles.subhalo import truncated_subhalo_deflection as _halo_deflection
 
 
 def centered_crop(image: np.ndarray, size: int) -> np.ndarray:
@@ -259,23 +260,6 @@ class SersicSource(torch.nn.Module):
         return self.log_peak.exp() * torch.exp(
             -(2 * n - 0.324) * (radius / self.log_radius.exp()).pow(1 / n)
         )
-
-
-def _halo_deflection(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    halo_x: float,
-    halo_y: float,
-    strength: torch.Tensor,
-    core: float = 0.035,
-    truncation: float = 0.22
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Deflection of the softened, truncated dark matter halo."""
-    dx = x - halo_x
-    dy = y - halo_y
-    radius_sq = dx**2 + dy**2
-    factor = strength * truncation / torch.sqrt((radius_sq + core**2) * (radius_sq + truncation**2) + 1e-12)
-    return factor * dx, factor * dy
 
 
 def _elliptical_sie(

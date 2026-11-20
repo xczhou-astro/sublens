@@ -17,6 +17,7 @@ from .profiles.macro import (
     MacroLensModel
 )
 from .profiles.subhalo import (
+    truncated_subhalo_deflection,
     nfw_subhalo_deflection,
     sis_subhalo_deflection,
     Subhalo,
@@ -25,6 +26,7 @@ from .profiles.subhalo import (
 
 # Simulation & Benchmarks
 from .simulation.simulator import LensingSimulator, build_gaussian_psf
+from .simulation.psf import build_psf_kernel
 from .simulation.sources import sersic_profile, generate_complex_source
 from .simulation.benchmarks import (
     create_j0946_benchmark,
@@ -50,8 +52,29 @@ from .inversion.voronoi import VoronoiSourceInverter
 from .benchmarks.lenstronomy_bench import LenstronomyBenchmark
 from .utils.metrics import compute_astrometric_error, compute_image_metrics
 from .utils.visualization import plot_diagnostic_figure
+from .observation import LensingObservation, SourceReconstructionResult
+from .inversion.multi_halo import MultiHaloProblem, MultiHaloFit
+from .execution import torch_backend, resolve_device
+from .detection import summarize_subhalo
+from .analysis import analyze_lens, AnalysisConfig
+from .profiles.models import EPL, SIE, Sersic, TruncatedHalo, NFW
+from .simulation.api import simulate_lens, SimulatedLens
+from .data import LensData, load_lens_data
 
 __all__ = [
+    "LensData", "load_lens_data",
+    "EPL", "SIE", "Sersic", "TruncatedHalo", "NFW",
+    "simulate_lens", "SimulatedLens",
+    "analyze_lens",
+    "AnalysisConfig",
+    "summarize_subhalo",
+    "torch_backend",
+    "resolve_device",
+    "LensingObservation",
+    "SourceReconstructionResult",
+    "MultiHaloProblem",
+    "MultiHaloFit",
+    "truncated_subhalo_deflection",
     "__version__",
     # High-level API
     "SubLensPipeline",
@@ -64,6 +87,7 @@ __all__ = [
     "MultiSubhaloPopulation",
     "LensingSimulator",
     "build_gaussian_psf",
+    "build_psf_kernel",
     "sersic_profile",
     "generate_complex_source",
     "create_j0946_benchmark",

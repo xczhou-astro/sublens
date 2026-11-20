@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name="sublens",
     version="1.0.0",
-    packages=find_packages(),
+    packages=find_packages(include=["sublens", "sublens.*"]),
     install_requires=[
         "torch>=2.0.0",
         "numpy>=1.22.0",

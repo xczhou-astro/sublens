@@ -10,6 +10,7 @@ Provides user-friendly, production-ready interfaces:
 import os
 import time
 import math
+from dataclasses import replace
 from typing import Dict, Any, Tuple, Optional, Union, List
 import torch
 import torch.nn as nn
@@ -46,7 +47,7 @@ def _parse_fits_input(
     noise_arr = None
 
     # 1. Parse image input
-    if isinstance(image_input, str):
+    if isinstance(image_input, (str, os.PathLike)):
         if not os.path.exists(image_input):
             raise FileNotFoundError(f"FITS file not found: {image_input}")
         with fits.open(image_input) as hdul:
@@ -129,7 +130,7 @@ def _parse_fits_input(
 
     # 2. Parse separate PSF input if provided
     if psf_input is not None:
-        if isinstance(psf_input, str):
+        if isinstance(psf_input, (str, os.PathLike)):
             with fits.open(psf_input) as hdul:
                 ext_names = [h.name.upper() for h in hdul]
                 if 'PSF' in ext_names:
@@ -143,7 +144,7 @@ def _parse_fits_input(
 
     # 3. Parse separate Noise input if provided
     if noise_input is not None:
-        if isinstance(noise_input, str):
+        if isinstance(noise_input, (str, os.PathLike)):
             with fits.open(noise_input) as hdul:
                 ext_names = [h.name.upper() for h in hdul]
                 if 'RMS' in ext_names:
@@ -628,6 +629,81 @@ class SubLensPipeline:
         """Instrument pixel scale in arcseconds per pixel."""
         return self.simulator.pixel_scale
 
+    def observation(self, image=None, *, noise=None, psf=None, macro_model=None,
+                    fit_mask=None, alpha_macro=None):
+        """Load generic lensing data from image/noise/PSF arrays or a FITS bundle."""
+        from .observation import LensingObservation
+
+        if isinstance(image, LensingObservation):
+            if any(value is not None for value in (noise, psf, macro_model, alpha_macro)):
+                raise ValueError("Pass array overrides when creating the observation")
+            return image if fit_mask is None else replace(
+                image, mask=image._fit_mask(fit_mask),
+            )
+        if image is None:
+            image = getattr(self, "_fits_path", getattr(self, "_cached_image", None))
+            noise = getattr(self, "_fits_noise", None) if noise is None else noise
+            psf = getattr(self, "_fits_psf", None) if psf is None else psf
+        if image is None:
+            raise ValueError("Supply an image array or FITS path")
+        if isinstance(image, (str, os.PathLike)):
+            return LensingObservation.from_fits(
+                image, noise=noise, psf=psf, macro_model=macro_model, mask=fit_mask,
+            )
+        model = macro_model if macro_model is not None else getattr(self, "macro_model", None)
+        if noise is None:
+            noise = self.simulator.noise_map[0, 0]
+            shape = tuple(image.shape[-2:])
+            if shape != tuple(noise.shape):
+                noise = self.noise_std
+        return LensingObservation.from_arrays(
+            image, noise,
+            self.simulator.psf_kernel[0, 0].detach().cpu().numpy()[::-1, ::-1]
+            if psf is None else psf,
+            pixel_scale=self.pixel_scale, macro_model=model, alpha_macro=alpha_macro, mask=fit_mask,
+        )
+
+    def reconstruct_delaunay(self, image=None, *, noise=None, psf=None, macro_model=None,
+                             alpha_macro=None, fit_mask=None, validation_mask=None, **options):
+        """Fit a Delaunay source from observation arrays, an object or a FITS path."""
+        observation = self.observation(
+            image, noise=noise, psf=psf, macro_model=macro_model,
+            alpha_macro=alpha_macro, fit_mask=fit_mask,
+        )
+        options.setdefault("device", self.device)
+        return observation.reconstruct_delaunay(validation_mask=validation_mask, **options)
+
+    def search_pinn(self, image=None, *, noise=None, psf=None, macro_model=None,
+                    alpha_macro=None, fit_mask=None, joint_refine=False, **options):
+        """Run PINN candidate discovery and optional joint macro/source refinement."""
+        observation = self.observation(
+            image, noise=noise, psf=psf, macro_model=macro_model,
+            alpha_macro=alpha_macro, fit_mask=fit_mask,
+        )
+        if joint_refine and observation.macro_model is None:
+            raise ValueError("Joint refinement needs macro_model or macro parameters in the FITS header")
+        result = observation.search_pinn(**options)
+        return result.refine_joint(observation.macro_model) if joint_refine else result
+
+    def analyze_lens(self, image=None, *, noise=None, psf=None, lens_light=None,
+                     mask=None, pixel_scale=None, **options):
+        """Complete PINN-only analysis with automatic macro initialization."""
+        from .analysis import analyze_lens
+        from .data import LensData
+        if image is None:image=getattr(self,'_fits_path',None)
+        if image is None:raise ValueError('Supply measured image arrays or a FITS path')
+        if isinstance(image,LensData):
+            options.setdefault('device',self.device)
+            return analyze_lens(image,noise=noise,psf=psf,lens_light=lens_light,
+                                mask=mask,pixel_scale=pixel_scale,**options)
+        if noise is None:noise=self.noise_map_input
+        if psf is None:psf=self.psf_kernel_input
+        options.setdefault('device',self.device)
+        if pixel_scale is None and not isinstance(image,(str,os.PathLike)):
+            pixel_scale=self.pixel_scale
+        return analyze_lens(image,noise=noise,psf=psf,lens_light=lens_light,mask=mask,
+                            pixel_scale=pixel_scale,**options)
+
     @classmethod
     def from_fits(
         cls,
@@ -674,6 +750,9 @@ class SubLensPipeline:
             **kwargs_clean
         )
         instance._cached_image = img_data
+        instance._fits_path = fits_path
+        instance._fits_noise = noise_path
+        instance._fits_psf = psf_path
         instance._fits_meta = meta
         if 'fit_mask' in meta:
             instance.fit_mask = meta['fit_mask']
@@ -746,14 +825,29 @@ class SubLensPipeline:
         source_fov: Optional[Union[float, str]] = "auto",
         source_resolution: Optional[int] = None,
         fix_macro: bool = True,
-        verbose: bool = True
+        verbose: bool = True,
+        proposal: Optional[str] = None,
+        joint_refine: bool = False
     ) -> SubLensResult:
         """
         Executes full automated 3-stage inversion:
         1. Smooth macro baseline fit + TV source inversion
         2. Astrometric Radar annular blind scan
         3. PINN continuous autograd refinement
+
+        With proposal="pinn", return PinnHaloSearchResult from Delaunay source
+        reconstruction and neural-potential discovery. joint_refine enables
+        joint EPL normalization, shear, halo and source refinement.
         """
+        if proposal is not None and proposal != "pinn":
+            raise ValueError("Use proposal='pinn' for neural-potential discovery")
+        if proposal == "pinn":
+            return self.search_pinn(
+                image, noise=noise_map, psf=psf_kernel, macro_model=macro_model,
+                fit_mask=fit_mask, joint_refine=joint_refine, pinn_steps=num_pinn_steps,
+            )
+        if joint_refine:
+            raise ValueError("Use proposal='pinn' with joint_refine=True")
         t0 = time.time()
 
         # Check for cached image from from_fits if image not explicitly provided

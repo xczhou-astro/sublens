@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from scipy.fft import next_fast_len
 
 
 def build_gaussian_psf(
@@ -60,7 +61,8 @@ class LensingSimulator:
             else:
                 self.device = torch.device("cpu")
         else:
-            self.device = torch.device(device)
+            from ..execution import resolve_device
+            self.device = resolve_device(device)
 
         # Image plane celestial coordinates (arcsec)
         self.L_img = (N_img - 1) / 2.0 * pixel_scale
@@ -117,6 +119,16 @@ class LensingSimulator:
         """Convolves an image tensor with the instrument PSF."""
         if image.dim() == 2:
             image = image.view(1, 1, self.N_img, self.N_img)
+        if image.device.type == "cpu" and self.psf_kernel.numel() > 225:
+            height,width=image.shape[-2:]
+            cy,cx=(n//2 for n in self.psf_kernel.shape[-2:])
+            ry,rx=min(cy,height-1),min(cx,width-1)
+            # conv2d is cross-correlation; reverse for the FFT convolution.
+            # Preserve full-kernel normalization even if support exceeds FOV.
+            kernel=self.psf_kernel[...,cy-ry:cy+ry+1,cx-rx:cx+rx+1].flip((-2,-1))
+            shape=tuple(next_fast_len(n+k-1) for n,k in zip((height,width),kernel.shape[-2:]))
+            result=torch.fft.irfft2(torch.fft.rfft2(image,s=shape)*torch.fft.rfft2(kernel,s=shape),s=shape)
+            return result[...,ry:ry+height,rx:rx+width]
         return F.conv2d(image, self.psf_kernel, padding=self.psf_pad)
 
     def simulate(
@@ -137,9 +149,27 @@ class LensingSimulator:
         if add_noise:
             if seed is not None:
                 torch.manual_seed(seed)
-            noise = self.noise_std * torch.randn_like(img_conv)
+            noise = self.noise_map * torch.randn_like(img_conv)
             img_obs = img_conv + noise
         else:
             img_obs = img_conv
 
         return img_obs, img_conv
+
+    def simulate_to_fits(self, path, source_img, alpha_total, *, alpha_macro,
+                         macro_model=None, add_noise=True, seed=None, mask=None,
+                         lens_id="simulation", overwrite=False):
+        """Simulate and export a reusable FITS bundle, returning LensingObservation.
+
+        alpha_macro is the unperturbed host deflection used for inference.
+        alpha_total includes every injected deflector.
+        """
+        from ..observation import LensingObservation
+
+        with torch.no_grad():
+            image, _ = self.simulate(source_img, alpha_total, add_noise=add_noise, seed=seed)
+            observation = LensingObservation.from_simulation(
+                self, image, alpha_macro, macro_model=macro_model, mask=mask, lens_id=lens_id,
+            )
+        observation.to_fits(path, overwrite=overwrite)
+        return observation

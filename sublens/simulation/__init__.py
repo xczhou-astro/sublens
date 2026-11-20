@@ -1,5 +1,7 @@
 from .simulator import LensingSimulator, build_gaussian_psf
+from .psf import build_psf_kernel
 from .sources import sersic_profile, generate_complex_source
+from .api import simulate_lens, SimulatedLens
 from .benchmarks import (
     create_j0946_benchmark,
     create_b1938_benchmark,
@@ -16,8 +18,10 @@ from .hst import (
 )
 
 __all__ = [
+    "simulate_lens", "SimulatedLens",
     "LensingSimulator",
     "build_gaussian_psf",
+    "build_psf_kernel",
     "sersic_profile",
     "generate_complex_source",
     "create_j0946_benchmark",

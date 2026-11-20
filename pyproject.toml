@@ -27,4 +27,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["sublens*"]
+include = ["sublens", "sublens.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

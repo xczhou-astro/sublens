@@ -16,6 +16,20 @@ from sublens.survey.euclid import (
 )
 
 
+# These are optional integrations against downloaded Q1 observations, not unit
+# fixtures distributed with the repository. Keep every assertion active when
+# the data is available; a source-only checkout explicitly reports a skip.
+_Q1_DATA = Path(__file__).resolve().parents[1] / "archive" / "data"
+_Q1_INPUTS = (
+    _Q1_DATA / "q1_discovery_engine_lens_catalog.csv",
+    _Q1_DATA / "lens" / "102158584_2687900321650859511" / "102158584_2687900321650859511.fits",
+)
+pytestmark = pytest.mark.skipif(
+    not all(path.exists() for path in _Q1_INPUTS),
+    reason="Optional Euclid Q1 integration needs the local archive/data catalogue and lens FITS",
+)
+
+
 def test_get_available_grade_a_lenses():
     """Tests catalog filtering for confirmed Grade A lenses."""
     catalog = get_available_grade_a_lenses(

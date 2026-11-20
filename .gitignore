@@ -54,6 +54,27 @@ test_b1938_diag/
 *.csv
 archive/
 
+# Local survey downloads, legacy workspace, and generated code graph
+/catalogue_part_*.zip
+/dr1_catalogue_v5_full/
+/subhalo_workspace/
+/graphify-out/
+
+# Research outputs stay local; Python runners and protocols are versioned
+/sublens_testing/api_validation/
+/sublens_testing/euclid_dr1_grade_a_part1*/
+/sublens_testing/euclid_dr1_one_lens/
+/sublens_testing/euclid_grade_a_10/
+/sublens_testing/*_results/
+/sublens_testing/multi_subhalo/
+/sublens_testing/one_subhalo/*/
+/sublens_testing/**/*.json
+/sublens_testing/**/*.log
+/sublens_testing/**/*.npy
+/sublens_testing/**/*.npz
+/sublens_testing/**/*.pdf
+/sublens_testing/**/tests_report.txt
+
 # Loose experimental scripts (not part of the package)
 astrophysical_systematics_suite.py
 blind_lensing_inversion.py

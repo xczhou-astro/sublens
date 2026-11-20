@@ -11,15 +11,12 @@ SOTA strong lensing frameworks (Lenstronomy PSO / MCMC / Bayesian grid):
 
 import time
 import math
+from importlib.util import find_spec
 from typing import Dict, Any, List, Optional
 import numpy as np
 import torch
 
-try:
-    import lenstronomy
-    LENSTRONOMY_AVAILABLE = True
-except ImportError:
-    LENSTRONOMY_AVAILABLE = False
+LENSTRONOMY_AVAILABLE = find_spec("lenstronomy") is not None
 
 
 class LenstronomyBenchmark:

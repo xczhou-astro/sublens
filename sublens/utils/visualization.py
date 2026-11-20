@@ -4,8 +4,140 @@ Publication-Quality Scientific Visualization Toolkit.
 
 from typing import Dict, Any, Optional
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 import numpy as np
 import torch
+
+
+def _pixel_extent(shape, scale):
+    height, width = shape
+    hx, hy = width * scale / 2, height * scale / 2
+    return (-hx, hx, -hy, hy)
+
+
+def plot_source_reconstruction(result, *, source_half_width=0.65, resolution=201,
+                               show_mesh=True, save_path=None):
+    """Return a source and image-plane diagnostic figure."""
+    source = result.source_image(half_width=source_half_width, size=resolution)
+    source_step = 2 * source_half_width / (resolution - 1)
+    prediction = result.source.image_model
+    observed = prediction + result.residual
+    extent = _pixel_extent(observed.shape, result.pixel_scale)
+    vmax = max(float(np.percentile(observed[result.fit_mask], 99.8)), 0.0)
+    residual = np.full(observed.shape, np.nan)
+    np.divide(result.residual, result.rms, out=residual, where=result.fit_mask)
+
+    fig, axes = plt.subplots(1, 4, figsize=(13, 3.7), layout="constrained")
+    ax = axes[0]
+    ax.imshow(source, origin="lower", extent=_pixel_extent(source.shape, source_step),
+              cmap="magma", vmin=0)
+    if show_mesh and result.source.method == "delaunay":
+        mesh = result.source.grid
+        ax.triplot(*mesh.points.T, mesh.simplices, color="white", linewidth=0.4, alpha=0.3)
+    ax.set(xlim=(-source_half_width, source_half_width), ylim=(-source_half_width, source_half_width),
+           title="Reconstructed source", xlabel=r"$\beta_x$ [arcsec]", ylabel=r"$\beta_y$ [arcsec]")
+
+    for ax, values, title in zip(axes[1:3], (observed, prediction), ("Observation", "PSF-convolved fit")):
+        ax.imshow(values, extent=extent, origin="lower", cmap="magma", vmin=0, vmax=vmax)
+        ax.set_title(title)
+    artist = axes[3].imshow(residual, extent=extent, origin="lower", cmap="RdBu_r", vmin=-4, vmax=4)
+    axes[3].set_title("Residual / RMS")
+    for ax in axes[1:]:
+        ax.set(xlabel=r"$\theta_x$ [arcsec]", ylabel=r"$\theta_y$ [arcsec]")
+    fig.colorbar(artist, ax=axes[3], shrink=0.8)
+    if save_path is not None:
+        fig.savefig(save_path, dpi=175)
+    return fig
+
+
+def plot_pinn_convergence(result, *, truth_position=None, zoom=0.28, smoothed=True, save_path=None):
+    """Return a signed convergence map with ranked peaks and optional local zoom."""
+    from ..inversion.potential import _smooth_convergence
+
+    if zoom is not None and (not np.isfinite(zoom) or zoom <= 0):
+        raise ValueError("Zoom must be a positive half-width in arcsec or None")
+    obs = result.observation
+    values = result.residual_potential.convergence
+    if smoothed:
+        values = _smooth_convergence(values, obs.pixel_scale)
+    shown = np.where(obs.mask, values, np.nan)
+    finite = np.abs(shown[np.isfinite(shown)])
+    limit = (np.percentile(finite, 99) or 1.0) if finite.size else 1.0
+    extent = _pixel_extent(shown.shape, obs.pixel_scale)
+    best = result.best_candidate
+    n_panels = 2 if zoom is not None and best is not None else 1
+    fig, axes = plt.subplots(1, n_panels, squeeze=False, figsize=(4.7 * n_panels, 4.5),
+                             layout="constrained")
+    axes = axes[0]
+    for ax in axes:
+        ax.set_facecolor("#ececed")
+        artist = ax.imshow(shown, origin="lower", extent=extent, cmap="RdBu_r",
+                           vmin=-limit, vmax=limit, interpolation="nearest")
+        for candidate in result.candidates:
+            x, y = candidate.seed
+            ax.scatter(x, y, s=96, facecolors="none", edgecolors="#17212d", zorder=3)
+            ax.annotate(str(candidate.rank), (x, y), xytext=(7, 7), textcoords="offset points",
+                        weight="bold", clip_on=True)
+        if truth_position is not None:
+            ax.scatter(*truth_position, marker="*", s=175, facecolors="none",
+                       edgecolors="#007d73", linewidths=1.7, label="Injected", zorder=4)
+        if best is not None and best.fit.strength > 0:
+            ax.scatter(*best.fit.position, marker="+", s=65, color="#17212d",
+                       linewidths=1.6, label="Refined", zorder=5)
+        ax.set(xlabel=r"$\theta_x$ [arcsec]", ylabel=r"$\theta_y$ [arcsec]")
+
+    for radius in result.search_radius:
+        axes[0].add_patch(Circle(obs.lens_center, radius, fill=False, linestyle="--",
+                                 edgecolor="#3d4650", linewidth=0.9, alpha=0.72))
+    axes[0].set(xlim=extent[:2], ylim=extent[2:], title=r"PINN $\delta\kappa$ and candidate peaks")
+    if n_panels == 2:
+        x, y = best.seed
+        axes[1].set(xlim=(x - zoom, x + zoom), ylim=(y - zoom, y + zoom),
+                    title=f"Zoom on peak {best.rank}")
+    handles, labels = axes[-1].get_legend_handles_labels()
+    if handles:
+        axes[-1].legend(handles, labels, loc="lower right")
+    label = r"Smoothed $\delta\kappa$" if smoothed else r"$\delta\kappa$"
+    fig.colorbar(artist, ax=axes, shrink=0.85, label=label)
+    if save_path is not None:
+        fig.savefig(save_path, dpi=175)
+    return fig
+
+
+def plot_pinn_residuals(result, *, normalized=True, limit=None, save_path=None):
+    """Return matched residual panels for the smooth macro and best candidate models."""
+    obs = result.observation
+    macro = result.residual_macro
+    with_halo = result.residual_with_subhalo
+    panels = [("Macro only", macro)]
+    if with_halo is not None:
+        panels.append(("Macro + subhalo", with_halo))
+
+    if limit is None:
+        limit = 4.0 if normalized else np.percentile(np.abs(macro[obs.mask]), 99) or 1.0
+    if not np.isfinite(limit) or limit <= 0:
+        raise ValueError("Residual color limit must be positive and finite")
+
+    extent = _pixel_extent(obs.image.shape, obs.pixel_scale)
+    fig, axes = plt.subplots(1, len(panels), squeeze=False, figsize=(4.7 * len(panels), 4.4),
+                             layout="constrained")
+    axes = axes[0]
+    for ax, (title, residual) in zip(axes, panels):
+        scaled = residual[obs.mask] / obs.rms[obs.mask]
+        shown = np.full(obs.image.shape, np.nan)
+        shown[obs.mask] = scaled if normalized else residual[obs.mask]
+        ax.set_facecolor("#ececed")
+        artist = ax.imshow(shown, origin="lower", extent=extent, cmap="RdBu_r",
+                           vmin=-limit, vmax=limit, interpolation="nearest")
+        score = np.mean(scaled**2)
+        ax.set(title=f"{title}\n" + rf"$\chi^2/N_{{\rm pix}} = {score:.3f}$",
+               xlabel=r"$\theta_x$ [arcsec]", ylabel=r"$\theta_y$ [arcsec]")
+
+    label = "Residual / RMS" if normalized else "Observed − model [image units]"
+    fig.colorbar(artist, ax=axes, shrink=0.85, label=label)
+    if save_path is not None:
+        fig.savefig(save_path, dpi=175, bbox_inches="tight", pad_inches=0.12)
+    return fig
 
 
 def plot_diagnostic_figure(

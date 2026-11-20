@@ -15,37 +15,75 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def truncated_subhalo_deflection(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    halo_x: float,
+    halo_y: float,
+    strength: torch.Tensor,
+    core: float = 0.035,
+    truncation: float = 0.22
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Deflection of the softened, truncated dark matter halo."""
+    dx = x - halo_x
+    dy = y - halo_y
+    radius_sq = dx**2 + dy**2
+    factor = strength * truncation / torch.sqrt((radius_sq + core**2) * (radius_sq + truncation**2) + 1e-12)
+    return factor * dx, factor * dy
+
+
+
 def nfw_subhalo_deflection(
     coords: torch.Tensor,
     center: torch.Tensor,
     kappa_s: torch.Tensor,
     r_s: float = 0.20
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Computes exact analytical deflection and convergence for an NFW subhalo."""
-    dx = coords[:, 0] - center[0]
-    dy = coords[:, 1] - center[1]
-    r = torch.sqrt(dx**2 + dy**2 + 1e-12)
-    x = r / r_s
+    """Bartelmann (1996) spherical NFW deflection and convergence.
 
-    eps = 1e-4
-    x_safe = torch.where(torch.abs(x - 1.0) < eps, torch.tensor(1.0 + eps, device=coords.device), x)
-    cond = x_safe < 1.0
+    Uses cancellation-free small-radius and x=1 series, with finite inactive
+    branches for autograd. At the exact singular centre alpha=0; convergence is
+    evaluated at x=1e-10 (float64) / 1e-6 (float32), not an inferred physical core.
+    r_s and coordinates are angular arcsec; kappa_s is dimensionless.
+    Reference: https://arxiv.org/abs/astro-ph/9602053, equations 2.8-2.10.
+    """
+    delta = torch.stack((coords[:, 0]-center[0], coords[:, 1]-center[1]), dim=-1)
+    floor = 1e-10 if coords.dtype == torch.float64 else 1e-6
+    x = (torch.linalg.vector_norm(delta, dim=-1)/r_s).clamp_min(floor)
+    t = x.square()-1
+    near = t.abs() < .01
+    small = x < .05
 
-    u_small = torch.sqrt(torch.clamp(1.0 - x_safe**2, min=1e-10, max=1.0 - 1e-6))
-    f_small = torch.atanh(u_small) / u_small
-    u_large = torch.sqrt(torch.clamp(x_safe**2 - 1.0, min=1e-10))
-    f_large = torch.atan(u_large) / u_large
-    F = torch.where(cond, f_small, f_large)
-    F = torch.where(torch.abs(x - 1.0) < eps, torch.tensor(1.0, device=coords.device), F)
+    # Safe placeholders keep every unselected branch finite and differentiable.
+    lower = torch.where((x < 1) & ~near & ~small, x, .5)
+    upper = torch.where((x > 1) & ~near, x, 2.)
+    f_lower = torch.acosh(1/lower)/torch.sqrt(1-lower.square())
+    z = torch.sqrt(upper.square()-1)
+    f_upper = torch.atan(z)/z
+    big_f = torch.where(x < 1, f_lower, f_upper)
+    safe_t = torch.where(near, torch.ones_like(t), t)
+    density = (1-big_f)/safe_t
+    mass_over_x2 = (torch.log(x/2)+big_f)/x.square()
 
-    denom = x**2 - 1.0
-    g = (1.0 - F) / torch.where(torch.abs(denom) < 1e-5, torch.tensor(1.0, device=coords.device), denom)
-    kappa = 2.0 * kappa_s * g
+    # F = atan(sqrt(t))/sqrt(t) analytically continued through t=0.
+    u = t.clamp(-.01, .01)
+    near_density = 1/3-u/5+u**2/7-u**3/9+u**4/11-u**5/13
+    near_f = 1-u/3+u**2/5-u**3/7+u**4/9-u**5/11+u**6/13
+    near_mass = (.5*torch.log1p(u)-math.log(2)+near_f)/(1+u)
+    density = torch.where(near, near_density, density)
+    mass_over_x2 = torch.where(near, near_mass, mass_over_x2)
 
-    h = (torch.log(torch.clamp(x / 2.0, min=1e-8)) + F) / torch.clamp(x, min=1e-6)
-    alpha_mag = 4.0 * kappa_s * r_s * h
-    alpha = torch.stack([alpha_mag * (dx / r), alpha_mag * (dy / r)], dim=-1)
-    return alpha, kappa
+    # Small-x expansion of F=acosh(1/x)/sqrt(1-x^2); avoid subtracting log(2/x).
+    s = x.clamp_max(.05)
+    log = torch.log(2/s)
+    s2 = s.square()
+    small_mass = (.5*log-.25 + s2*(3/8*log-7/32)
+                  + s2**2*(5/16*log-37/192) + s2**3*(35/128*log-533/3072))
+    small_density = (log-1 + s2*(3/2*log-5/4)
+                     + s2**2*(15/8*log-47/32) + s2**3*(35/16*log-319/192))
+    density = torch.where(small, small_density, density)
+    mass_over_x2 = torch.where(small, small_mass, mass_over_x2)
+    return 4*kappa_s*mass_over_x2[:, None]*delta, 2*kappa_s*density
 
 
 def sis_subhalo_deflection(
